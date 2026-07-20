@@ -178,10 +178,37 @@ sets. This is enforced by the read-only architecture, not merely by prompt.
 - (For a real deployment) a QRadar **read-only authorized service token** and, if QRadar uses an
   internal CA, the CA bundle.
 
+### Cloning (the qradar-mcp submodule)
+
+`qradar-mcp/` is a **git submodule** pinned to commit `b8f6a4a3fe901eac4f55e4ca5d146d952f55db51`
+of <https://github.com/IBM/qradar-mcp.git>. The Compose stack builds its image from that checkout,
+so a clone without it will fail at `docker compose build qradar-mcp`.
+
+```bash
+# Either clone recursively:
+git clone --recurse-submodules <this-repo> qradar-observability
+
+# …or populate it after an ordinary clone:
+git clone <this-repo> qradar-observability && cd qradar-observability
+git submodule update --init --recursive
+```
+
+Verify the pin before building — it must report exactly this commit, and the leading status
+character must be a space (not `+`, which would mean the checkout has drifted off the pin):
+
+```bash
+git submodule status
+#  b8f6a4a3fe901eac4f55e4ca5d146d952f55db51 qradar-mcp (heads/main)
+```
+
+The pin is deliberate: the MCP allowlist in `backend/app/providers/qradar_mcp.py` is written
+against the tool surface of that exact commit. Do not bump it without re-reviewing the allowlist
+against [docs/mcp-capability-matrix.md](docs/mcp-capability-matrix.md).
+
 ### Quick start (mock provider — no QRadar needed)
 
 ```bash
-git clone <this-repo> qradar-observability && cd qradar-observability
+git clone --recurse-submodules <this-repo> qradar-observability && cd qradar-observability
 
 cp .env.example .env
 # Generate the two required secrets:
