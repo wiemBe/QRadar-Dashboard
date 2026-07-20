@@ -48,6 +48,7 @@ from app.core.config import Settings, get_settings
 from app.models.enums import RuleDependencyKind, RuleHealthStatus
 from app.models.instance import QRadarInstance
 from app.models.log_source import LogSource
+from app.models.monitoring import CollectionWatermark
 from app.models.rule import (
     AnalyticsRule,
     RuleDependency,
@@ -56,6 +57,12 @@ from app.models.rule import (
 )
 
 logger = logging.getLogger("app.services.rule_health")
+
+#: Watermark whose existence proves rule-firing observations are complete.
+#: `RuleMetric` rows are the only evidence that anyone *looked* for firings, so
+#: until this collector has completed a run covering the evaluation window,
+#: "no observed firings" means "nobody has looked", not "it never fired".
+RULE_METRIC_COLLECTOR = "rule_metric"
 
 
 @dataclass
@@ -131,6 +138,7 @@ class RuleHealthEvaluator:
         deps = await self._dependencies([r.id for r in rules])
         bb_state = await self._building_block_state(instance.id)
         ls_health = await self._log_source_type_health(instance.id, now)
+        observation_complete = await self._observation_complete(instance.id, window_start)
 
         for rule in rules:
             verdict = self.classify(
@@ -142,6 +150,7 @@ class RuleHealthEvaluator:
                 dependencies=deps.get(rule.id, []),
                 building_block_enabled=bb_state,
                 log_source_type_healthy=ls_health,
+                observation_complete=observation_complete,
             )
             report.evaluated += 1
             report.by_status[verdict.status] = report.by_status.get(verdict.status, 0) + 1
@@ -169,7 +178,15 @@ class RuleHealthEvaluator:
         dependencies: list[RuleDependency],
         building_block_enabled: dict[str, bool],
         log_source_type_healthy: dict[str, bool],
+        observation_complete: bool = False,
     ) -> HealthVerdict:
+        """Classify one rule.
+
+        `observation_complete` says whether a rule-metric collection has actually
+        covered the window. It defaults to False — fail closed — because without
+        it a zero trigger count carries no information, and NEVER_OBSERVED would
+        be an assertion the platform cannot support.
+        """
         expected = rule.expected_daily_firings
 
         def verdict(
@@ -278,6 +295,27 @@ class RuleHealthEvaluator:
 
         # 5. Genuine silence, with dependencies healthy.
         if rule.last_fired_at is None and trigger_count == 0:
+            if not observation_complete:
+                # A zero count with no completed collection behind it is an
+                # absence of measurement, not an absence of firings. Claiming
+                # NEVER_OBSERVED here would report the collector's own gap as a
+                # detection gap — the exact confusion this platform exists to
+                # remove.
+                return verdict(
+                    RuleHealthStatus.INSUFFICIENT_DATA,
+                    (
+                        "No completed rule-metric collection covers the evaluation "
+                        "window, so the absence of observed firings is not evidence "
+                        "that the rule has never fired."
+                    ),
+                    confidence=0.2,
+                    building_blocks_healthy=bb_ok,
+                    required_log_sources_healthy=ls_ok,
+                    evidence={
+                        "age_days": round(age_days, 2),
+                        "observation_complete": False,
+                    },
+                )
             return verdict(
                 RuleHealthStatus.NEVER_OBSERVED,
                 (
@@ -286,7 +324,7 @@ class RuleHealthEvaluator:
                 ),
                 building_blocks_healthy=bb_ok,
                 required_log_sources_healthy=ls_ok,
-                evidence={"age_days": round(age_days, 2)},
+                evidence={"age_days": round(age_days, 2), "observation_complete": True},
             )
 
         if rule.last_fired_at is not None:
@@ -385,6 +423,28 @@ class RuleHealthEvaluator:
             .group_by(RuleMetric.rule_id)
         )
         return {rid: (int(fires), int(offenses)) for rid, fires, offenses in rows.all()}
+
+    async def _observation_complete(
+        self, instance_id: uuid.UUID, window_start: datetime
+    ) -> bool:
+        """Has a rule-metric collection actually covered the evaluation window?
+
+        Only a watermark that advanced *into* the window counts. A collector
+        that has never run, that failed, or whose progress stops before the
+        window begins leaves the window unobserved, and every downstream
+        "zero firings" reading is then unmeasured rather than measured-zero.
+        """
+        watermark = await self.session.scalar(
+            select(CollectionWatermark).where(
+                CollectionWatermark.instance_id == instance_id,
+                CollectionWatermark.collector == RULE_METRIC_COLLECTOR,
+            )
+        )
+        if watermark is None or watermark.intervals_collected <= 0:
+            return False
+        if watermark.watermark_at is None:
+            return False
+        return self._aware(watermark.watermark_at) >= window_start
 
     async def _dependencies(
         self, rule_ids: list[uuid.UUID]

@@ -34,6 +34,19 @@ PERM_ALERT_ACK = "alert:ack"
 PERM_ALERT_RESOLVE = "alert:resolve"
 PERM_ADMIN = "admin:*"
 
+# Phase 3 read capabilities. Offense records carry parsed usernames, source
+# addresses and analyst assignments, and the rule/coverage views describe where
+# detection is absent -- a map of where to attack. None of it may be served to
+# an unauthenticated caller, so these routes declare a permission rather than
+# relying on the endpoint being read-only.
+#
+# All three are satisfied by the `read:*` wildcard, so an existing read-only
+# role keeps working; what changes is that *some* principal is now required.
+PERM_OFFENSE_READ = "read:offenses"
+PERM_RULE_READ = "read:rules"
+PERM_COVERAGE_READ = "read:coverage"
+PERM_PROVIDER_READ = "read:providers"
+
 
 class PermissionDenied(Exception):
     def __init__(self, permission: str) -> None:

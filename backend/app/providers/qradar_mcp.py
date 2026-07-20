@@ -368,9 +368,30 @@ class QRadarMCPProvider(QRadarProvider):
                 )
                 raise ProviderUnavailableError(f"MCP tool {tool_name} failed upstream")
 
-            body = self._decode(response, outcome)
+            try:
+                body = self._decode(response, outcome)
+            except ProviderError as exc:
+                # An oversized or unparseable body is still a completed call
+                # attempt. Letting it escape unaudited would leave the most
+                # common tool-side failures invisible to incident review.
+                await self._audit(
+                    tool_name, caller=caller, outcome="FAILURE", started=started,
+                    arg_keys=sorted(clean_args), error=type(exc).__name__,
+                )
+                raise
 
-        result = self._unwrap(tool_name, body)
+        try:
+            result = self._unwrap(tool_name, body)
+        except ProviderError as exc:
+            # A JSON-RPC `error` member, or an envelope we cannot interpret.
+            # This is how a tool reports invalid arguments or an internal
+            # fault, so it is the failure an operator most needs recorded.
+            await self._audit(
+                tool_name, caller=caller, outcome="FAILURE", started=started,
+                arg_keys=sorted(clean_args), error=type(exc).__name__,
+            )
+            raise
+
         await self._audit(
             tool_name, caller=caller, outcome="SUCCESS", started=started,
             arg_keys=sorted(clean_args), error=None,

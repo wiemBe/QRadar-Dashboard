@@ -287,22 +287,146 @@ through a lookup table and an unknown value returns 422 rather than silently fal
 | Gate | Result |
 |---|---|
 | `ruff check app tests` | **clean** |
-| `mypy app` | **29 errors in 17 files** — baseline was 30/17. Delta computed by normalising line numbers: **zero new errors**; one pre-existing `no-untyped-def` in `metric_collector.py` was incidentally fixed. |
-| `pytest -m "not integration"` | **129 passed** |
-| `pytest -m integration` | **91 passed** |
-| `pytest` | **220 passed, 0 skipped, 0 failed** |
-| `alembic upgrade head` + `alembic check` | clean on fresh DB, on Phase-2 DB, and across a downgrade round trip |
+| `mypy app` | **29 errors in 17 files** — unchanged baseline, **zero new errors** |
+| `pytest -m "not integration"` | **474 passed** |
+| `pytest -m integration` | **211 passed** |
+| `pytest` | **685 passed, 0 skipped, 0 failed** |
+| `alembic upgrade head` + `alembic check` | **no drift** on a freshly created database |
 | Frontend `npm ci` / `lint` / `typecheck` / `test` / `build` | all pass — 22 tests, production build succeeds on Next 15.5.20 |
 | `npm audit --omit=dev` | 4 moderate, 0 high, 0 critical |
 
-**Note the test counts are unchanged from the Phase 2 baseline (220).** No Phase 3 test
-has been written yet. The Phase 3 code is currently exercised only indirectly.
+Test totals: **227 → 685** (+458). See §7a for the breakdown.
 
 ### Not performed
 
 - `docker compose up -d --build` full-stack health check — **not run**.
 - Compose smoke tests against the live endpoints — **not run**.
-- Any Phase 3 unit or integration test — **not written**.
+- Celery worker/beat registration — **no Phase 3 tasks exist yet** (§8.1).
+
+> **Running the gates.** Run pytest from `backend/`, not the repo root: the migration
+> tests resolve `alembic.ini` relative to the working directory and fail otherwise.
+> Never run two pytest processes against the test database concurrently — they share
+> one schema and will produce spurious cross-run failures.
+>
+> `alembic check` must run against a **freshly created** database. The `db_schema`
+> fixture drops all model tables on teardown but leaves `alembic_version` stamped, so
+> a post-test-run `alembic check` reports the entire schema as drift. Recreate the
+> database first (`DROP DATABASE` / `CREATE DATABASE`) — this is the pre-existing
+> Phase 2 behaviour noted in §9.3, not a Phase 3 regression.
+
+---
+
+## 7a. Characterization test workstream
+
+Commit: `test(phase3): cover providers offenses rules and coverage`.
+
+The Phase 3 core from `e733648` shipped with no tests. This workstream characterizes
+the existing implementation; it adds **no new production features**.
+
+### Tests added by domain
+
+| Domain | File | Tests |
+|---|---|---|
+| QRadar REST provider | `tests/unit/test_qradar_rest_provider.py` | 82 |
+| QRadar MCP provider | `tests/unit/test_qradar_mcp_provider.py` | 124 |
+| Rule health | `tests/unit/test_rule_health.py` | 45 |
+| Detection coverage | `tests/unit/test_detection_coverage.py` | 43 |
+| Offense change detection / bounding | `tests/unit/test_offense_domain.py` | 46 |
+| Offense collection (DB) | `tests/integration/test_offense_collection.py` | 30 |
+| Rule health + coverage (DB) | `tests/integration/test_rule_health_coverage.py` | 29 |
+| Phase 3 API (DB) | `tests/integration/test_phase3_api.py` | 59 |
+
+Integration tests run against the real TimescaleDB service; nothing about
+PostgreSQL/TimescaleDB is mocked. HTTP and MCP transports are mocked (`httpx.MockTransport`),
+retry sleeps are captured rather than performed, and jitter uses a seeded `Random`, so no
+test depends on a live QRadar instance or on wall-clock timing.
+
+### Production bugs discovered and fixed
+
+**1. Phase 3 API endpoints were unauthenticated.** *(security — the significant one)*
+
+`offenses`, `rules`, `coverage` and `providers` were registered with no principal
+dependency and no permission check. Phase 2 routers guard writes via `PrincipalDep` +
+`require_permission`; these four guarded nothing, so **under OIDC they served offence
+records — parsed usernames, source addresses, analyst assignment — and a map of where
+detection coverage is absent, to a caller presenting no bearer token at all.**
+
+Fixed by enforcing at the router rather than per-handler, so a new endpoint added to one
+of these modules cannot ship unguarded by omission:
+
+- `app/security/rbac.py` — added `PERM_OFFENSE_READ`, `PERM_RULE_READ`,
+  `PERM_COVERAGE_READ`, `PERM_PROVIDER_READ` (all `read:*`-prefixed).
+- `app/api/deps.py` — added `requires(permission)`, a dependency that resolves
+  `get_principal` (this is what enforces authentication) then checks the permission.
+- `app/api/router.py` — the four Phase 3 routers now declare `dependencies=[...]`.
+
+Compatibility: all four are satisfied by the existing `read:*` wildcard, so read-only and
+admin roles are unaffected. What changes is that *some* principal is now required.
+Guarded by `TestAuthorization`, including a schema-driven test that walks every Phase 3
+path in the OpenAPI document and asserts each refuses an unauthorized caller.
+
+**2. MCP tool failures escaped the audit log.**
+
+In `QRadarMCPProvider.call_tool`, `_decode` and `_unwrap` were called outside the audited
+region. A JSON-RPC `error` member — the ordinary way a tool reports invalid arguments or
+an internal fault — propagated with **no audit record written at all**, as did an
+oversized response and unparseable JSON. Transport, auth and HTTP-status failures were
+audited; the most common failure mode was not.
+
+Fixed in `app/providers/qradar_mcp.py`: both calls are now wrapped, emitting a `FAILURE`
+record before re-raising. `TestAuditing` asserts exactly one audit record per call across
+the success and every failure path.
+
+### Behaviour corrections (not bugs, but semantics changed)
+
+**3. `NEVER_OBSERVED` now requires proof of observation.** *(carried in from the
+uncommitted working-tree change; tested and committed here)*
+
+No successful `RuleMetric` collection exists yet, so a zero trigger count meant "nobody
+looked", not "it never fired". `RuleHealthEvaluator.classify` took `trigger_count == 0`
+plus `last_fired_at is None` as evidence and returned `NEVER_OBSERVED` — reporting the
+collector's own gap as a detection gap, the exact confusion this platform exists to
+remove.
+
+`classify` now takes `observation_complete`, **defaulting to `False`** so a caller that
+omits it cannot get the unsafe verdict. `evaluate_instance` derives it from a real
+`CollectionWatermark` for collector `rule_metric`: the watermark must exist, have
+`intervals_collected > 0`, and have advanced *into* the evaluation window. Otherwise the
+verdict is `INSUFFICIENT_DATA` with `confidence=0.2` and
+`evidence["observation_complete"] = False`.
+
+Covered by `TestObservationCompleteness` (unit) and
+`TestObservationCompletenessAgainstTheDatabase` (integration — including that another
+collector's watermark, another instance's watermark, a zero-interval watermark, and a
+watermark stopping short of the window all fail closed).
+
+This supersedes §9.6, which predicted every enabled rule would classify as
+`NEVER_OBSERVED`. It now classifies as `INSUFFICIENT_DATA` until rule-metric collection
+lands.
+
+### Known limitations recorded, deliberately not "fixed"
+
+- **Offense entity-list ordering.** `offense_content_hash` hashes
+  `source_addresses` / `usernames` / `rule_ids` in received order, so a reordered but
+  otherwise identical list reads as a change and writes a redundant snapshot. Not
+  normalized: sorting would also erase first-seen ordering that the aggregation layer may
+  later rely on. Pinned by `TestListOrdering` so the behaviour is a decision, not an
+  accident.
+- **Per-record failure isolation in `OffenseCollector._store` is partial.** Only
+  `ValueError`/`TypeError` are caught. A record failing at the *database* layer
+  (over-length text, constraint violation) aborts the transaction and the whole run, and
+  the advisory-lock release then fails too. Fixing it properly needs a per-record
+  SAVEPOINT — deferred, documented at the test that probes the boundary.
+- **`httpx` deprecation.** Passing `ca_bundle` as a string triggers
+  `DeprecationWarning: verify=<str> is deprecated`. Works today; should become
+  `ssl.create_default_context(cafile=...)`.
+
+### Not covered by this workstream
+
+`RuleCollector.sync` (rule/building-block inventory synchronization, dependency mapping,
+SOC-metadata preservation) has **no dedicated tests yet** — it is the largest remaining
+characterization gap. The repository layer (`OffenseRepository` aggregations, top-entity
+queries, magnitude trend) is exercised only through the API surface, not directly.
 
 ---
 
@@ -381,8 +505,13 @@ feature commit.
    `_to_rule()` once tested against a real console — and note that where QRadar gives us
    nothing, the collector records an *inference* with confidence, never a fact.
 6. **Rule health depends on `rule_metric` being populated.** Nothing currently writes it
-   for Phase 3; without firing counts every enabled rule will classify as
-   NEVER_OBSERVED. The rule-metric feed is a prerequisite for meaningful rule health.
+   for Phase 3. ~~Without firing counts every enabled rule will classify as
+   NEVER_OBSERVED.~~ **Corrected (§7a.3):** an enabled silent rule now classifies as
+   `INSUFFICIENT_DATA` until a completed rule-metric collection covers the evaluation
+   window; `NEVER_OBSERVED` can no longer be emitted without that proof. The rule-metric
+   feed remains a prerequisite for *meaningful* rule health — until it lands, rule health
+   and every detection-coverage verdict downstream of it read as unestablished rather
+   than as gaps.
 7. **echarts moderate XSS** remains until the echarts 6 upgrade (§2).
 
 ---
