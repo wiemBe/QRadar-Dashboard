@@ -17,10 +17,32 @@ _SECRET_KEY_RE = re.compile(
 _TOKEN_VALUE_RE = re.compile(r"[A-Za-z0-9_\-]{24,}")
 _MASK = "***redacted***"
 
+#: Keys whose values are correlation identifiers, not credentials.
+#:
+#: A UUID and a QRadar SEC token are the same shape, so the value-level
+#: token heuristic below masks both. That is the right default — but applied to
+#: an audit record's own correlation and instance ids it destroys the only
+#: thing that makes the records joinable, silently, because the mask is a
+#: non-empty string that still looks fine in a spot check.
+#:
+#: The exemption is keyed on the *name*, and only these names, so it cannot
+#: widen to a value that merely happens to sit next to one. Never add a key
+#: here whose value could carry a credential.
+_IDENTIFIER_KEYS = frozenset({"correlation_id", "instance_id"})
+
 
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: (_MASK if _SECRET_KEY_RE.search(k) else redact(v)) for k, v in value.items()}
+        return {
+            k: (
+                _MASK
+                if _SECRET_KEY_RE.search(k)
+                else v
+                if k in _IDENTIFIER_KEYS and isinstance(v, str)
+                else redact(v)
+            )
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, str):

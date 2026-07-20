@@ -97,7 +97,13 @@ async def _for_each_instance(
             return {"status": "no-instance", "instances": 0, "results": []}
 
         for instance in instances:
-            provider = build_provider_for_instance(instance) if needs_provider else None
+            provider = (
+                # audit_session wires the MCP audit sink to AuditLog; it is
+                # inert for the REST provider, which audits via telemetry.
+                build_provider_for_instance(instance, audit_session=session)
+                if needs_provider
+                else None
+            )
             try:
                 outcome = await run(session, instance, provider)
                 await session.commit()

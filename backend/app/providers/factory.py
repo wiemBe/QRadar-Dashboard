@@ -6,8 +6,11 @@ imports a concrete provider class directly.
 
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import ProviderKind, Settings, get_settings
 from app.models.instance import QRadarInstance
+from app.providers.audit_sink import make_audit_sink
 from app.providers.base import QRadarProvider
 from app.providers.mock import MockQRadarProvider
 from app.providers.qradar_mcp import QRadarMCPProvider
@@ -46,6 +49,9 @@ def build_provider(settings: Settings | None = None) -> QRadarProvider:
 def build_provider_for_instance(
     instance: QRadarInstance,
     settings: Settings | None = None,
+    *,
+    audit_session: AsyncSession | None = None,
+    correlation_id: str | None = None,
 ) -> QRadarProvider:
     """Build a provider bound to one registered QRadar instance.
 
@@ -86,6 +92,18 @@ def build_provider_for_instance(
             return QRadarMCPProvider(
                 base_url=instance.mcp_base_url or settings.mcp_base_url,
                 timeout=settings.mcp_timeout_seconds,
+                # Without a session there is nowhere to persist to; the
+                # provider then falls back to log-only auditing rather than
+                # failing, so a caller that has no transaction can still read.
+                audit_sink=(
+                    make_audit_sink(
+                        audit_session,
+                        instance_id=instance.id,
+                        correlation_id=correlation_id,
+                    )
+                    if audit_session is not None
+                    else None
+                ),
             )
 
     raise ValueError(f"Unknown provider kind: {instance.provider_kind}")
