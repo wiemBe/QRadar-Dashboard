@@ -106,6 +106,12 @@ async def test_retention_service_disabled_by_default(db_session) -> None:
 
     settings = Settings(encryption_key="x" * 44)  # retention_enabled defaults False
     outcome = await apply_policies(db_session, settings)
-    # Either timescale is absent, or every table is explicitly retention-disabled.
+    # Nothing may be armed: each table is either explicitly retention-disabled or
+    # not Timescale-managed in this metadata-built schema. Anything else means a
+    # destructive policy was applied by default.
     if outcome.get("_status") != "timescaledb-absent":
-        assert all(v == "retention-disabled" for k, v in outcome.items() if not k.startswith("_"))
+        assert all(
+            v in ("retention-disabled", "not-a-hypertable")
+            for k, v in outcome.items()
+            if not k.startswith("_")
+        )

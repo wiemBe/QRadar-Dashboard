@@ -84,11 +84,14 @@ async def make_search(
     schedule_cron: str = "*/5 * * * *",
     **kwargs,
 ) -> ScheduledSearch:
+    defaults = dict(
+        query_version=1, severity=Severity.MEDIUM, max_time_range_hours=24,
+        max_result_rows=1000, visualization_type=VisualizationType.TABLE, enabled=True,
+    )
+    defaults.update(kwargs)
     s = ScheduledSearch(
-        name=name, aql_query=aql, query_version=1, schedule_cron=schedule_cron,
-        threshold_value=threshold_value, severity=Severity.MEDIUM,
-        timeout_seconds=timeout_seconds, max_time_range_hours=24, max_result_rows=1000,
-        visualization_type=VisualizationType.TABLE, enabled=True, **kwargs,
+        name=name, aql_query=aql, schedule_cron=schedule_cron,
+        threshold_value=threshold_value, timeout_seconds=timeout_seconds, **defaults,
     )
     session.add(s)
     await session.flush()

@@ -1,9 +1,14 @@
 # Phase 2 Development Handoff
 
 **Written:** 2026-07-20
+**Last updated:** 2026-07-20 — Phase 2 **complete**; see §21 for the closing session.
 **Branch:** `master`
 **Handoff commit:** `checkpoint: phase 2 session handoff` (see `git log -1`)
 **Preceding commit:** `c8ee3f9` — `feat: complete phase 2 analytics and alerting`
+
+> **Status:** the two remaining tasks in §7 are done and §20's acceptance criteria are met. §7 and
+> §14 are retained as the historical record of what was outstanding; **§21 is authoritative** for
+> current state, test counts and known issues.
 
 This document is the complete state of the project at the end of the Phase 2 implementation
 session. Everything below was verified against the code in this repository. Where something could
@@ -748,24 +753,189 @@ frontend cleanups), TD-2 (chip away at mypy debt).
 
 Phase 2 is done when **all** of the following hold:
 
-- [ ] `make test-integration` passes against a real PostgreSQL + TimescaleDB — **all 200 tests**,
-      0 failures, 0 errors. (Currently: 125 pass, 75 skip for lack of a database.)
-- [ ] `make check` (`alembic upgrade head && alembic check`) reports **no drift**.
-- [ ] `make lint` → `All checks passed!`
-- [ ] `mypy app` introduces **no new errors** beyond the 30-error Phase 1 baseline.
-- [ ] `cd frontend && npm run typecheck && npm run build` both succeed.
-- [ ] An operator can **acknowledge and resolve an alert from `/alerts/[id]`**, and the resulting
+- [x] `make test-integration` passes against a real PostgreSQL + TimescaleDB — 0 failures, 0 errors.
+      **Achieved: 220 passed, 0 skipped** (the suite grew from 200 by the 20 tests added for the
+      result-trend endpoint; 18 pre-existing failures were fixed first — see §21.1).
+- [x] `make check` (`alembic upgrade head && alembic check`) reports **no drift**.
+- [x] `make lint` → `All checks passed!`
+- [x] `mypy app` introduces **no new errors** beyond the 30-error Phase 1 baseline.
+- [x] `cd frontend && npm run typecheck && npm run build` both succeed.
+- [x] An operator can **acknowledge and resolve an alert from `/alerts/[id]`**, and the resulting
       `AlertNotification` row is visible in that page's delivery history.
-- [ ] An operator can **trigger a manual run from `/searches/[id]`** and see the new execution
+- [x] An operator can **trigger a manual run from `/searches/[id]`** and see the new execution
       appear in the history.
-- [ ] `/searches/[id]` renders a **result-trend chart** from `SearchResultMetric` data, with
+- [x] `/searches/[id]` renders a **result-trend chart** from `SearchResultMetric` data, with
       **query-version boundaries annotated**.
-- [ ] `GET /searches/{id}/results` is implemented, returns ordered points, and has integration
+- [x] `GET /searches/{id}/results` is implemented, returns ordered points, and has integration
       tests.
-- [ ] A 403 from a permission-guarded action surfaces as a clear message in the UI, not a silent
+- [x] A 403 from a permission-guarded action surfaces as a clear message in the UI, not a silent
       failure.
-- [ ] `README.md` Phase 2 section and test counts match reality.
-- [ ] `qradar-mcp/` gitlink still reads `b8f6a4a3fe901eac4f55e4ca5d146d952f55db51`, unmodified.
-- [ ] No Phase 3 code exists — no offense analysis, no MITRE coverage, no LLM implementation, and
+- [x] `README.md` Phase 2 section and test counts match reality.
+- [x] `qradar-mcp/` gitlink still reads `b8f6a4a3fe901eac4f55e4ca5d146d952f55db51`, unmodified.
+- [x] No Phase 3 code exists — no offense analysis, no MITRE coverage, no LLM implementation, and
       `QRadarRestProvider` / `QRadarMCPProvider` data methods still raise `NotImplementedError`.
-- [ ] No existing test was weakened, skipped or deleted.
+- [x] No existing test was weakened, skipped or deleted.
+
+---
+
+## 21. Closing session — Phase 2 completed (2026-07-20)
+
+This section supersedes §7 and §14. It records the session that finished Phase 2 on a machine with
+Docker available, so **every integration test ran against a real database for the first time.**
+
+### 21.1 The integration suite was red on first real execution
+
+§14 warned that 75 integration tests had never been executed. They were run, and **18 failed** (17
+or 18 depending on ordering). None of the failures were caused by the new work — they were latent
+defects that a DB-less environment could not surface. Eight distinct root causes, all fixed:
+
+| # | Tests | Root cause | Fix |
+|---|---|---|---|
+| A | `test_migrations.py` (5) | `alembic/env.py` unconditionally overwrote `sqlalchemy.url` from `Settings`, clobbering the URL the test set on its own `Config`. Every migration test dialled host `postgres`. | `_resolve_url()` — Settings remains the single source of truth, but a URL already set by a programmatic caller wins. `alembic.ini`'s inert placeholder is treated as unset. |
+| B | `test_alert_api_notifications.py` (4) | Sync `TestClient` drives the app on its own event loop while `db_session` holds an asyncpg connection bound to the test's loop → `Future attached to a different loop`. | Switched to `httpx.AsyncClient` + `ASGITransport`, which runs the app on the test's loop. |
+| C | `test_notification_dispatch.py` (4) | Two real product bugs in `app/alerts/dispatcher.py`. (1) `enqueue()` caught `IntegrityError` and called `session.rollback()`, discarding the *entire* transaction including rows already enqueued. (2) `_message_from_payload()` read `notif.transition.value`, but these columns are `Mapped[Enum]` over a plain `String(16)`, so a row loaded from the DB yields `str`. | (1) `begin_nested()` SAVEPOINT with the `add()` inside it. (2) Construct the StrEnum from the raw value. |
+| D | `test_anomaly_engine.py` (1) | **Product bug.** `AnomalyEngine.evaluate_interval` handled open-then-anomalous with nothing at all, so `AlertService.open_or_update` — which exists precisely to bump `occurrence_count` with `transition=None` — was never called again. `occurrence_count` was frozen at 1 for every anomaly alert. | Added `_refresh()`, invoked while a condition stays anomalous. It bumps the count and refreshes evidence and, because `open_or_update` returns `transition=None` for an already-open alert, still never notifies. |
+| E | `test_baseline.py` (1) | **Test bug.** Asserted `sample_count == 12` for a 12-week series, but the test configures `baseline_lookback_days=60`, which admits only weeks 4–11. The product was right. | Assertion corrected to 8, with the derivation written down. It is also exactly `baseline_min_samples`, so it doubles as the reliability boundary. |
+| F | `test_search_scheduler.py` (1) | `factories.make_search()` passed `enabled=True` positionally *and* forwarded `**kwargs` → `got multiple values for keyword argument`. | Overridable `defaults` dict, matching `make_metric()`'s existing idiom in the same file. |
+| G | `test_permissions.py` (1) | `test_admin_can_create_search` writes to the DB but used no schema fixture; it passed only when a previous test happened to leave tables behind. | New `db_schema` fixture in `conftest.py`; `db_session` now builds on it, and DB-touching tests that drive their own engine depend on it explicitly. |
+| H | `test_db_constraints.py` (1) | **Product bug.** `apply_policies()` treated "extension installed" as "tables are hypertables" and called `remove_retention_policy()` on plain tables, which raises even with `if_exists => TRUE`. Reachable in production: the initial migration skips hypertable creation on vanilla Postgres, so a later extension install produces exactly this state. | `_hypertables()` filters to Timescale-managed tables; unmanaged ones report `not-a-hypertable`. |
+
+Also fixed: `alembic check` reported three phantom `remove_index` operations, because
+`create_hypertable()` implicitly builds a `<table>_<time column>_idx` that is not in model metadata.
+`env.py`'s `include_object` now excludes them, the same way Timescale's schemas were already
+excluded.
+
+**No test was deleted, skipped or weakened.** Two assertions changed (E, H); both were corrected
+*towards* the product's actual, correct behaviour and are documented above.
+
+### 21.2 New backend surface
+
+`GET /api/v1/searches/{search_id}/results` — `app/api/routes/searches.py::list_results`.
+
+Query parameters: `metric_key` (default `total`), `start`, `end`, `limit` (default 500, hard cap
+`RESULTS_MAX_LIMIT = 5000`). Response schemas in `app/schemas/search.py`:
+
+- `ResultMetricPoint` — `bucket_start`, `metric_key`, `value`, `dimensions`, `execution_id`,
+  `execution_status`, `duration_ms`, `result_count`, `threshold_breached`, `query_version`,
+  `query_version_id`.
+- `SearchResultTrendOut` — `search_id`, `metric_key`, `threshold_value`, `threshold_operator`,
+  `count`, `points[]`.
+
+Design decisions:
+
+- **Chronological, but the limit keeps the newest.** Ordered `bucket_start DESC` + `LIMIT`, then
+  reversed. Returning the oldest 500 of 50,000 points would render a stale chart labelled current.
+- **One joined query.** `SearchResultMetric` → `SearchExecution` (inner) → `SearchQueryVersion`
+  (outer, so a pruned version row does not drop the point). Enforced by a test that asserts the
+  query count for 3 points equals the query count for 30.
+- **UTC everywhere.** `_as_utc()` reads a naive bound as UTC and *converts* an offset bound rather
+  than relabelling it — relabelling would shift every point on the chart.
+- **`threshold_value` sits at the top level**, not per point: it is the search's *current* threshold,
+  whereas each point's `threshold_breached` records what was true at the time.
+- **No new permission.** Consistent with `list_versions` / `list_executions` on the same router.
+
+### 21.3 New frontend surface
+
+The first `"use client"` components in the codebase. Every page remains a React Server Component;
+only ids and primitives cross the boundary.
+
+| File | Purpose |
+|---|---|
+| `components/AlertActions.tsx` | Acknowledge (when `OPEN`) and resolve, with an optional reason bounded to the schema's 1000 chars. |
+| `components/RunSearchButton.tsx` | Manual run; reports the resulting execution status and count. |
+| `components/ResultTrend.tsx` | ECharts trend. **The only module importing ECharts.** |
+
+`lib/api.ts` gains `acknowledgeAlert`, `resolveAlert`, `runSearch`, `searchResults`, the
+`ResultMetricPoint` / `SearchResultTrend` types, `next_run_at` on `ScheduledSearch` (TD-5), and
+`actionErrorMessage()` — which maps 401/403/404/409/422 to actionable text and collapses everything
+else to a fixed string, so a raw exception carrying a stack trace or an internal host can never
+reach the DOM.
+
+Chart behaviour worth preserving:
+
+- A **failed run breaks the line** (`null`, `connectNulls: false`) instead of plotting 0. A zero
+  invents a traffic cliff that never happened.
+- **Query-version boundaries are dashed `markLine`s** — results either side of an AQL change are not
+  comparable, and the UI must say so.
+- The ECharts instance is **disposed** on unmount and resized via **`ResizeObserver`**.
+- ECharts is registered modularly (`echarts/core` + `LineChart` + 4 components). The barrel import
+  cost 340 kB on this route; the route is now 176 kB / 281 kB First Load JS.
+
+### 21.4 Frontend toolchain (new)
+
+There was **no lockfile and no test framework**. Both were added:
+
+- `package-lock.json` is now committed. `npm ci` was impossible before; the `Dockerfile` comment
+  saying so is now out of date but was left alone (deployment change, not Phase 2 scope).
+- Vitest + Testing Library + jsdom, `vitest.config.ts`, `vitest.setup.ts`, and `npm test`.
+- `.eslintrc.json` (`next/core-web-vitals`) — `next lint` had no config and would otherwise prompt
+  interactively.
+
+`src/lib/sections.ts` had a **pre-existing** type error (`phase: 1 | 2 | 3` vs the Phase 4 admin
+entry) that failed `tsc --noEmit`. The type was widened to match the data and §12 of this document.
+
+### 21.5 Verification results
+
+All commands actually executed on 2026-07-20 against
+`timescale/timescaledb:2.17.2-pg16` on port 5433. Backend deps installed into `backend/.venv`
+(Python 3.14.6).
+
+```
+ruff check app tests            All checks passed!
+mypy app                        Found 30 errors in 17 files (checked 84 source files)
+pytest -m "not integration"     129 passed, 91 deselected
+pytest -m integration            91 passed, 129 deselected
+pytest                          220 passed, 0 skipped, 0 failed
+
+alembic upgrade head + check    No new upgrade operations detected.
+
+npm run lint                    No ESLint warnings or errors
+npm run typecheck               clean
+npm test                        22 passed (3 files)
+npm run build                   Compiled successfully
+```
+
+**Mypy is unchanged from the recorded baseline.** Verified by diff, not by counting: the error list
+from a clean `git worktree` of the previous commit and the error list now are identical — 30 vs 30,
+zero added, zero removed.
+
+**Zero skipped tests.** The `TEST_DATABASE_URL` skip guard remains in place for environments without
+a database, but it did not trigger in this run.
+
+**What was not done:** the operator controls were verified by 22 Vitest component tests (including
+in-flight disabling, double-submit suppression, and 401/403/404/409 handling), by the backend
+integration tests that prove acknowledge/resolve enqueue exactly one notification, and by a passing
+production build — **but not by clicking through a browser.** No human-in-the-loop UI pass was
+performed.
+
+### 21.6 Database verification
+
+Against a freshly migrated empty database:
+
+- TimescaleDB extension `2.17.2` present.
+- All four hypertables exist: `log_source_metric`, `search_result_metric`, `rule_metric`,
+  `offense_snapshot`.
+- `policy_retention` jobs: **0** — retention stays opt-in and is never applied by a migration.
+- Partial unique dedup index `uq_alert_active_dedup` present, plus 13 other unique constraints.
+- The new endpoint was exercised **live over HTTP** against real stored rows (uvicorn on :8099):
+  ordering, the version join with real `query_version_id`s, a failed run, bounded windows, an
+  offset-timezone bound, `limit` keeping the newest, 404, and both 422 rejection paths.
+
+### 21.7 Remaining risks and debt
+
+- **TD-1 (open)** — `SearchScheduler` still takes no advisory lock. Unchanged; Phase 4.
+- **TD-2 (open)** — the 30-error mypy baseline is untouched. Not in scope to chip at here.
+- **TD-3 (open)** — `execution_instance_key()` still returns `"default"`. Phase 3.
+- **TD-4 (open)** — `syncLogSources()` is still uncalled. It was left alone deliberately: wiring a
+  mutation into the log-source page is Phase 1 UI scope, not one of the two Phase 2 tasks.
+- **TD-5 (closed)** — `next_run_at` is on the `ScheduledSearch` type and rendered.
+- **TD-6 (open)** — `default_policy()` still reads `os.environ` directly.
+- **NEW — `next@15.1.3` has a published advisory** (CVE-2025-66478); npm warns on install. Upgrading
+  Next is a deliberate dependency change, not a Phase 2 feature commit. **Flag for Phase 4.**
+- **NEW — enum columns are `Mapped[Enum]` over `String`.** Root cause C(2). Anything reading such a
+  column from a freshly loaded row gets `str`, not the annotated enum, and `.value` will raise. The
+  dispatcher is fixed; the pattern exists across the models and deserves a systematic fix (a
+  `TypeDecorator`) in Phase 4.
+- The full application stack (`docker-compose.yml`: backend, redis, celery, frontend images) was
+  **not** brought up; only the test database was. The backend was run directly with uvicorn for the
+  live endpoint check.

@@ -1,3 +1,5 @@
+import { ResultTrend } from "@/components/ResultTrend";
+import { RunSearchButton } from "@/components/RunSearchButton";
 import { api, type SearchExecution } from "@/lib/api";
 
 function execTone(status: string): string {
@@ -32,10 +34,14 @@ export default async function SearchDetailPage({
 
   return (
     <>
-      <h2>{search.name}</h2>
+      <div className="actions" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>{search.name}</h2>
+        <RunSearchButton searchId={search.id} />
+      </div>
       <p className="subtitle">
         {search.category ?? "uncategorised"} · severity {search.severity} · v
         {search.query_version} · <code>{search.schedule_cron}</code>
+        {search.next_run_at ? ` · next run ${new Date(search.next_run_at).toLocaleString()}` : ""}
       </p>
 
       <div className="card">
@@ -101,10 +107,10 @@ export default async function SearchDetailPage({
         </tbody>
       </table>
 
-      <p className="subtitle" style={{ marginTop: 16 }}>
-        Result-trend charts (Apache ECharts) render here once executions accumulate. Trends
-        annotate query-version boundaries, since results across versions are not comparable.
-      </p>
+      <h3 style={{ marginTop: 24 }}>Result Trend</h3>
+      <div className="card">
+        <ResultTrend searchId={search.id} />
+      </div>
     </>
   );
 }

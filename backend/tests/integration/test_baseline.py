@@ -53,7 +53,10 @@ async def test_reliable_baseline_from_enough_samples(db_session) -> None:
     )
     assert cell is not None
     assert cell.is_reliable is True
-    assert cell.sample_count == 12
+    # 12 weekly samples are written, but baseline_lookback_days=60 admits only
+    # those from 2026-07-25 onwards -- weeks 4..11, i.e. 8. That is exactly
+    # baseline_min_samples, so this is also the reliability boundary.
+    assert cell.sample_count == 8
     assert 48 <= cell.median <= 52
 
 

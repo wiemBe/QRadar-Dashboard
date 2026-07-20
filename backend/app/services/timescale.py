@@ -20,11 +20,30 @@ from app.core.config import Settings, get_settings
 logger = logging.getLogger("app.timescale")
 
 
+_METRIC_TABLES = ("log_source_metric", "search_result_metric", "rule_metric", "offense_snapshot")
+
+
 async def _timescale_available(session: AsyncSession) -> bool:
     result = await session.execute(
         text("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
     )
     return result.scalar() is not None
+
+
+async def _hypertables(session: AsyncSession) -> set[str]:
+    """Which of our metric tables Timescale actually manages.
+
+    The extension being installed does not imply the tables were converted: the
+    initial migration creates hypertables only when the extension is present at
+    migration time, so a schema migrated on vanilla Postgres and upgraded later
+    has plain tables. Both add_retention_policy() and remove_retention_policy()
+    raise on a non-hypertable even with if_exists/if_not_exists, so unmanaged
+    tables must be filtered out rather than attempted.
+    """
+    result = await session.execute(
+        text("SELECT hypertable_name FROM timescaledb_information.hypertables")
+    )
+    return {row[0] for row in result}
 
 
 async def apply_policies(session: AsyncSession, settings: Settings | None = None) -> dict[str, str]:
@@ -40,8 +59,12 @@ async def apply_policies(session: AsyncSession, settings: Settings | None = None
         return {"_status": "timescaledb-absent"}
 
     retention = settings.retention_days()
+    managed = await _hypertables(session)
 
-    for table in ("log_source_metric", "search_result_metric", "rule_metric", "offense_snapshot"):
+    for table in _METRIC_TABLES:
+        if table not in managed:
+            outcome[table] = "not-a-hypertable"
+            continue
         days = retention.get(table)
         if days is None:
             # Retention disabled or unset for this table: ensure no policy exists
@@ -63,8 +86,9 @@ async def apply_policies(session: AsyncSession, settings: Settings | None = None
 
     if settings.compression_after_days is not None:
         cdays = settings.compression_after_days
-        for table in ("log_source_metric", "search_result_metric", "rule_metric",
-                      "offense_snapshot"):
+        for table in _METRIC_TABLES:
+            if table not in managed:
+                continue
             await session.execute(
                 text("ALTER TABLE " + table + " SET (timescaledb.compress = true)")
             )

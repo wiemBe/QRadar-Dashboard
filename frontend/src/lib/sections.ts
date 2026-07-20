@@ -3,7 +3,8 @@
 export interface Section {
   slug: string;
   label: string;
-  phase: 1 | 2 | 3;
+  // Administration is Phase 4; the other scaffolded sections are Phase 3.
+  phase: 1 | 2 | 3 | 4;
   live: boolean;
 }
 

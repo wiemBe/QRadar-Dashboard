@@ -244,6 +244,8 @@ class AnomalyEngine:
             and state.consecutive_anomalous >= thresholds.open_after
         ):
             await self._open(log_source, metric, evidence, state, in_maintenance, report)
+        elif state.is_open and signal is DetectorSignal.ANOMALOUS:
+            await self._refresh(log_source, evidence, state, in_maintenance)
         elif (
             state.is_open
             and signal is DetectorSignal.HEALTHY
@@ -285,26 +287,52 @@ class AnomalyEngine:
         if in_maintenance:
             return
         result = await self.alerts.open_or_update(
-            AlertInput(
-                fingerprint=anomaly_fingerprint(log_source.id, evidence.anomaly_type.value),
-                title=f"{evidence.anomaly_type.value} on {log_source.name}",
-                severity=evidence.severity,
-                source_type="log_source",
-                source_id=log_source.id,
-                description=evidence.reason,
-                evidence=evidence.to_dict(),
-                source_anomaly_ids=[str(anomaly.id)],
-                context={
-                    "log_source": log_source.name,
-                    "owner": log_source.owner,
-                    "criticality": str(log_source.criticality),
-                },
-            )
+            self._alert_input(log_source, evidence, anomaly.id)
         )
         # Enqueue a notification only on a genuine OPEN transition (dedup: an
         # update to an already-open alert has transition=None).
         if self._enqueuer is not None and result.transition is not None:
             await self._enqueuer.enqueue(result.alert, result.transition)
+
+    def _alert_input(
+        self, log_source: LogSource, evidence: AnomalyEvidence, anomaly_id: uuid.UUID | None
+    ) -> AlertInput:
+        return AlertInput(
+            fingerprint=anomaly_fingerprint(log_source.id, evidence.anomaly_type.value),
+            title=f"{evidence.anomaly_type.value} on {log_source.name}",
+            severity=evidence.severity,
+            source_type="log_source",
+            source_id=log_source.id,
+            description=evidence.reason,
+            evidence=evidence.to_dict(),
+            source_anomaly_ids=[str(anomaly_id)] if anomaly_id is not None else [],
+            context={
+                "log_source": log_source.name,
+                "owner": log_source.owner,
+                "criticality": str(log_source.criticality),
+            },
+        )
+
+    async def _refresh(
+        self,
+        log_source: LogSource,
+        evidence: AnomalyEvidence,
+        state: LogSourceDetectorState,
+        in_maintenance: bool,
+    ) -> None:
+        """A still-anomalous interval on an already-open condition.
+
+        Re-asserting the alert bumps occurrence_count and refreshes the evidence,
+        so an operator can see how many intervals the condition has persisted for
+        rather than a count frozen at 1. open_or_update returns transition=None
+        for an already-open alert, so this deliberately never notifies — that is
+        the anti-noise guarantee, and it is why no enqueue happens here.
+        """
+        if in_maintenance:
+            return
+        await self.alerts.open_or_update(
+            self._alert_input(log_source, evidence, state.open_anomaly_id)
+        )
 
     async def _resolve(
         self,

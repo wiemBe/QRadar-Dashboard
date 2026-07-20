@@ -81,12 +81,17 @@ class NotificationDispatcher:
                 next_attempt_at=self._clock(),
                 payload=redact(payload),
             )
-            self.session.add(notif)
             try:
-                await self.session.flush()
+                # SAVEPOINT, not a plain flush: a duplicate on one route must not
+                # roll back the rows already enqueued for the other routes in this
+                # same transition, nor any work the caller did before enqueueing.
+                # The add() belongs inside the savepoint so the failed insert is
+                # unwound with it and the session stays usable.
+                async with self.session.begin_nested():
+                    self.session.add(notif)
+                    await self.session.flush()
             except IntegrityError:
                 # Duplicate (alert, transition, channel, target): already queued.
-                await self.session.rollback()
                 continue
             created.append(notif)
         return created
@@ -186,7 +191,10 @@ class NotificationDispatcher:
             title=p.get("title", "alert"),
             body=p.get("body", ""),
             severity=Severity(p.get("severity", "MEDIUM")),
-            transition=AlertTransition(p.get("transition", notif.transition.value)),
+            # These columns are String-backed, so a row loaded from the database
+            # yields a plain str rather than the annotated enum. StrEnum accepts
+            # both, so construct from the raw value instead of reaching for .value.
+            transition=AlertTransition(p.get("transition") or notif.transition),
             alert_id=p.get("alert_id", str(notif.alert_id)),
             fingerprint=p.get("fingerprint", ""),
             fields=p.get("fields", {}),

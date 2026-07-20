@@ -1,3 +1,4 @@
+import { AlertActions } from "@/components/AlertActions";
 import { Evidence } from "@/components/Evidence";
 import { api, sevTone, type Notification } from "@/lib/api";
 
@@ -51,6 +52,8 @@ export default async function AlertDetailPage({
         <p>Resolution: {alert.resolution_reason ?? "—"}</p>
         <p>Source anomalies: {alert.source_anomaly_ids.length}</p>
       </div>
+
+      <AlertActions alertId={alert.id} status={alert.status} />
 
       <h3 style={{ marginTop: 24 }}>Notification Delivery History</h3>
       {notifications.length === 0 ? (

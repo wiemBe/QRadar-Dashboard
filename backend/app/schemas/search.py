@@ -129,3 +129,45 @@ class ExecutionOut(BaseModel):
     error_message: str | None
     retry_count: int
     threshold_breached: bool
+
+
+class ResultMetricPoint(BaseModel):
+    """One stored aggregate, joined to the execution that produced it.
+
+    `query_version` is carried per point on purpose: results either side of an
+    AQL change are not comparable, so the chart must be able to mark where the
+    query changed rather than drawing one continuous line across the boundary.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    bucket_start: datetime
+    metric_key: str
+    value: float
+    dimensions: dict = Field(default_factory=dict)
+
+    execution_id: uuid.UUID
+    execution_status: str
+    duration_ms: int | None
+    result_count: int | None
+    threshold_breached: bool
+
+    query_version: int
+    query_version_id: uuid.UUID | None
+
+
+class SearchResultTrendOut(BaseModel):
+    """Chronological result trend for one search and one metric key.
+
+    `threshold_value` is the search's *current* threshold, so it is reported once
+    at the top level rather than per point -- a stored point carries whether it
+    breached at the time (`threshold_breached`), which is the value that stays
+    true retrospectively.
+    """
+
+    search_id: uuid.UUID
+    metric_key: str
+    threshold_value: float | None
+    threshold_operator: str
+    count: int
+    points: list[ResultMetricPoint]

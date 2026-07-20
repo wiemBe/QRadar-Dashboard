@@ -264,11 +264,24 @@ Unit tests cover the health-score arithmetic, output sanitization, mock-provider
 MCP allowlist and no-AQL capability, TLS refusal, encrypted-column round-trip, production config
 hardening, robust statistics, alert fingerprinting, notification routing and cron expansion.
 Integration tests exercise inventory sync, metric collection, baselines, the anomaly engine, the
-search executor and scheduler, search alerting, notification dispatch and the API against a real
-database, and **skip cleanly** when `TEST_DATABASE_URL` is unset. All QRadar responses in tests are
-mocked and no notification is ever really sent (`MockNotifier`).
+search executor and scheduler, search alerting, notification dispatch, the result-trend endpoint and
+the API against a real database, and **skip cleanly** when `TEST_DATABASE_URL` is unset. All QRadar
+responses in tests are mocked and no notification is ever really sent (`MockNotifier`).
 
-Current suite: **124 unit tests passing, 76 integration tests** (DB-gated), `ruff check` clean.
+Current suite: **220 tests — 129 unit + 91 integration, all passing with 0 skipped** against a real
+`timescale/timescaledb:2.17.2-pg16` instance (`make db-test-up && make test-integration`).
+`ruff check` clean; `mypy app` reports the unchanged 30-error Phase 1 baseline.
+
+Frontend tests run under Vitest + Testing Library:
+
+```bash
+cd frontend
+npm install          # no lockfile was committed before; package-lock.json now exists
+npm run lint
+npm run typecheck
+npm test             # 22 component tests
+npm run build
+```
 
 Note on tooling: the enforced gates are `ruff check` and `pytest` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). `mypy` runs advisory-only until the Phase 1
@@ -325,6 +338,36 @@ another, all flowing into the same lifecycle and notification pipeline:
 and therefore no threshold breach — it would otherwise fail silently, which is precisely the blind
 spot this platform exists to close.
 
+### Result trends
+
+`GET /api/v1/searches/{search_id}/results` returns a search's stored aggregates, oldest first, for
+charting:
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `metric_key` | `total` | `total` plus one key per GROUP BY dimension |
+| `start` / `end` | unbounded | Inclusive. Naive timestamps are read as UTC; offsets are converted, never relabelled |
+| `limit` | 500 (max 5000) | When more points match, the **most recent** win — a chart silently showing the oldest 500 of 50,000 points would be actively misleading |
+
+Each point carries its `execution_id`, `execution_status`, `duration_ms`, `result_count`,
+`threshold_breached`, `query_version` and `query_version_id`. Executions and version rows are joined
+in one statement, so point count never drives query count. An inverted range or an over-cap limit is
+rejected with 422; an unknown search is 404.
+
+`/searches/[id]` renders this with Apache ECharts (`components/ResultTrend.tsx`, the only place
+ECharts is imported). A **failed run breaks the line rather than plotting zero** — inventing a
+traffic cliff that never happened is worse than a visible gap — and **dashed markers annotate
+query-version boundaries**, because results either side of an AQL change are not comparable.
+
+### Operator actions
+
+`/alerts/[id]` and `/searches/[id]` expose acknowledge, resolve and manual-run controls
+(`components/AlertActions.tsx`, `components/RunSearchButton.tsx`). These are the only client
+components in the app: every page remains a React Server Component and passes ids and primitives
+across the boundary, never an object or a credential. Authorization stays entirely server-side — the
+components call the guarded endpoints and render the outcome, and a 403 surfaces as a clear
+permissions message rather than a silent failure.
+
 Operator actions (acknowledge / resolve) enqueue notifications too, so a manual resolve is not
 invisible to whoever is on call. Enqueueing is always separate from delivery: an HTTP request
 records the intent and returns, and the `dispatch_notifications` worker does the sending with retry
@@ -341,7 +384,8 @@ lints and updates this README.
 - **Phase 1 ✅** — architecture, Docker Compose, models + migrations, `MockQRadarProvider`,
   SOC overview + log-source inventory.
 - **Phase 2 ✅** — scheduled searches, metric collection, anomaly detection, alert lifecycle +
-  notifications (Teams / email / Slack / generic webhook / syslog).
+  notifications (Teams / email / Slack / generic webhook / syslog), operator action UI
+  (acknowledge / resolve / manual run) and the ECharts result-trend chart.
 - **Phase 3** — offenses, analytics rules, rule health, detection coverage; the real
   `QRadarRestProvider` and `QRadarMCPProvider`.
 - **Phase 4** — security hardening, expanded tests, documentation, observability.

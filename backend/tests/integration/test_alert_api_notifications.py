@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.alerts.service import AlertInput, AlertService
@@ -28,14 +28,24 @@ from app.security.rbac import Principal
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
-def _client(session, principal: Principal) -> TestClient:
+def _client(session, principal: Principal) -> httpx.AsyncClient:
+    """An in-process async client sharing the test's session.
+
+    Deliberately not the sync TestClient: that drives the app on its own event
+    loop, while `db_session` holds an asyncpg connection bound to the test's
+    loop, so the shared session would fail with "attached to a different loop".
+    ASGITransport runs the app on this loop instead.
+    """
+
     async def _session():
         yield session
 
     app = create_app()
     app.dependency_overrides[get_session] = _session
     app.dependency_overrides[get_principal] = lambda: principal
-    return TestClient(app)
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    )
 
 
 async def _open_alert(session):
@@ -60,9 +70,10 @@ async def _notifications(session, alert_id) -> list[AlertNotification]:
 async def test_acknowledge_enqueues_a_notification(db_session, monkeypatch) -> None:
     monkeypatch.setenv("NOTIFY_GENERIC_WEBHOOK_URL", "https://hook.internal/alerts")
     alert = await _open_alert(db_session)
-    client = _client(db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"})))
-
-    resp = client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
+    async with _client(
+        db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"}))
+    ) as client:
+        resp = await client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
     assert resp.status_code == 200, resp.text
 
     rows = await _notifications(db_session, alert.id)
@@ -75,9 +86,12 @@ async def test_acknowledge_enqueues_a_notification(db_session, monkeypatch) -> N
 async def test_resolve_enqueues_a_recovery_notification(db_session, monkeypatch) -> None:
     monkeypatch.setenv("NOTIFY_GENERIC_WEBHOOK_URL", "https://hook.internal/alerts")
     alert = await _open_alert(db_session)
-    client = _client(db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"})))
-
-    resp = client.post(f"/api/v1/alerts/{alert.id}/resolve", json={"reason": "log source restored"})
+    async with _client(
+        db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"}))
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/alerts/{alert.id}/resolve", json={"reason": "log source restored"}
+        )
     assert resp.status_code == 200, resp.text
 
     rows = await _notifications(db_session, alert.id)
@@ -88,10 +102,11 @@ async def test_repeated_acknowledge_does_not_enqueue_twice(db_session, monkeypat
     """The second acknowledge is a no-op transition, and a no-op must not page."""
     monkeypatch.setenv("NOTIFY_GENERIC_WEBHOOK_URL", "https://hook.internal/alerts")
     alert = await _open_alert(db_session)
-    client = _client(db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"})))
-
-    client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
-    client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
+    async with _client(
+        db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"}))
+    ) as client:
+        await client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
+        await client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
 
     assert len(await _notifications(db_session, alert.id)) == 1
 
@@ -104,7 +119,10 @@ async def test_no_configured_channel_enqueues_nothing(db_session, monkeypatch) -
     ):
         monkeypatch.delenv(var, raising=False)
     alert = await _open_alert(db_session)
-    client = _client(db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"})))
+    async with _client(
+        db_session, Principal(subject="analyst", permissions=frozenset({"admin:*"}))
+    ) as client:
+        resp = await client.post(f"/api/v1/alerts/{alert.id}/acknowledge")
 
-    assert client.post(f"/api/v1/alerts/{alert.id}/acknowledge").status_code == 200
+    assert resp.status_code == 200
     assert await _notifications(db_session, alert.id) == []

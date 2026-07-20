@@ -54,7 +54,9 @@ def test_viewer_cannot_create_search() -> None:
     assert resp.status_code == 403
 
 
-def test_admin_can_create_search() -> None:
+def test_admin_can_create_search(db_schema) -> None:
+    # Reaches the database, so it needs a real schema rather than whatever a
+    # previously-run test left behind.
     client = _client_with(Principal(subject="admin", permissions=frozenset({"admin:*"})))
     resp = client.post("/api/v1/searches", json=VALID_SEARCH)
     assert resp.status_code == 201, resp.text
