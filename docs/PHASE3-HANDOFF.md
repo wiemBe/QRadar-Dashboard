@@ -1,6 +1,12 @@
 # Phase 3 Development Handoff
 
-**Status: INCOMPLETE — backend core landed, background jobs / tests / frontend / docs outstanding.**
+**Status: VERTICAL SLICE WORKING against a live QRadar 7.6.0 FP1 lab.** Collection,
+scheduling, APIs and the offense/rule/coverage frontend all run end to end on real data.
+Remaining: Compose stack verification, and the analytics depth Phase 3 originally scoped.
+
+> **Read [§11](#11-live-qradar-session) first** if you are picking this up. It records what
+> was proven against a real appliance, and three findings that will cost you a day each if
+> you rediscover them.
 
 This session ran out of budget partway through Phase 3. This document records exactly
 what was built, what was verified and how, and what the next session must do. Nothing
@@ -525,3 +531,165 @@ feature commit.
 - Resolve the 29 pre-existing mypy errors.
 - Only then consider the LLM/RAG work — explicitly out of scope for Phase 3, and the
   read-only MCP posture must survive it unchanged.
+
+---
+
+## 11. Live QRadar session
+
+This session connected the platform to a real appliance for the first time. Everything
+below was executed, not designed.
+
+### 11.1 The lab
+
+| | |
+|---|---|
+| Console | QRadar CE, reachable over a verified TLS chain |
+| Version | **7.6.0 FP1** (`external_version` 7.6.0.0) |
+| API versions offered | 0.1 → **29.0** (43 total, 34 flagged deprecated — including 20.0) |
+| PKI | three-level: leaf → `QRadar Local CA` → `QRadar Local Root CA` |
+
+Credentials live in `.secrets/` (git-ignored). `.gitignore` previously covered `*.pem`
+but **not** `.secrets/` or `*.sec`, so a token file would have been committable; fixed.
+
+### 11.2 Three findings that cost real time
+
+**1. The CA bundle needs two certificates, not one.**
+QRadar sends only its leaf. A bundle containing just the intermediate fails with
+`unable to get issuer certificate`. Concatenate root + intermediate.
+
+**2. Python rejects a certificate `openssl` accepts.**
+Python 3.13+ turns on `VERIFY_X509_STRICT` in `create_default_context`, enforcing
+RFC 5280 §4.2.1.1. QRadar's self-generated console certificate has a Subject Key
+Identifier but **no Authority Key Identifier**, so verification fails with
+`Missing Authority Key Identifier` while the `openssl` CLI verifies the same chain
+happily. This presents as an application-only TLS failure after everything else checks
+out.
+
+`QRADAR_TLS_ALLOW_MISSING_AKI=true` clears that one flag in `app/providers/tls.py`.
+Chain, expiry and hostname/IP-SAN verification remain enforced, and the context refuses
+to build if they are ever weakened. **This is not `verify_ssl=false`**, which the
+codebase still refuses outright.
+
+**3. `/analytics/rules` on 7.6.0 returns 14 fields, and none of them are firing evidence.**
+
+```
+average_capacity  base_capacity  base_host_id  capacity_timestamp  creation_date
+enabled  id  identifier  linked_rule_identifier  modification_date  name  origin
+owner  type
+```
+
+No `last_triggered_time`. No `building_block_ids`. No `log_source_type_ids`. No
+rule-statistics endpoint exists to substitute. This confirms §9.5 against a real console
+and has three consequences:
+
+- **Rule health cannot be established from inventory alone.** 95 of 133 rules classify as
+  `INSUFFICIENT_DATA` and **zero** as `NEVER_OBSERVED`. That is the correct output, not a
+  gap in the implementation — see §7a.3.
+- **`rule_dependency` stays empty**, because explicit dependencies are read from
+  `building_block_ids`.
+- **Detection coverage has nothing to evaluate**, and reports `NOT_EVALUATED`.
+
+The one defensible metric source available is offense contribution: an offense names its
+contributing rules, which *proves* those rules fired. In this lab all 7 offenses trace to
+**1** rule, so that would establish 1 of 133. Deliberately not built yet — see §12.
+
+### 11.3 What was proven
+
+Three consecutive `python -m app.cli.sync all` runs against the live console:
+
+| | 1st run | 2nd | 3rd |
+|---|---|---|---|
+| Log sources | 36 created | 36 updated | 36 updated |
+| Offenses | 7 seen / 7 written | — | — |
+| Rules (incl. building blocks) | 352 created | 250 upd / 102 unch | 352 unchanged |
+| Rule health | 133 evaluated | 133 | 133 |
+
+Row counts afterwards — **no duplicates**:
+
+| Table | Rows | Distinct |
+|---|---|---|
+| `log_source` | 36 | 36 |
+| `analytics_rule` | 352 | 352 |
+| `offense_snapshot` | **7** | 7 |
+| `rule_health_snapshot` | 399 | 133 (×3 evaluations — time series, intended) |
+| `qradar_instance` | 1 | 1 |
+
+`offense_snapshot` holding 7 rows rather than 21 is the content-hash change detection from
+§6.3 working on real data. Watermarks reached `intervals_collected=3` with
+`consecutive_failures=0` for all three collectors. Re-running `qradar add` left the
+instance count at 1.
+
+All 15 offense/rule/coverage/provider endpoints return 200 against this data, and all four
+frontend routes render it.
+
+> **Rules converge on the third run, not the second.** Run 2 reports 250 updates because
+> `_create` does not populate every field `_qradar_fingerprint` compares, so the first
+> update writes them. Run 3 is fully `unchanged`. Harmless but worth tidying.
+
+### 11.4 What this session added
+
+| Commit | |
+|---|---|
+| `e01c487` | File-backed tokens, `app/providers/tls.py`, `build_provider_for_instance` |
+| `b7b6f7b` | `LogSourceCollector`, 5 Celery tasks + Beat entries, `app.cli.qradar` / `app.cli.sync` |
+| `9adbd48` | MCP audit sink → `AuditLog`; redaction correlation fix |
+| `9b4baae` | `CountEntry` key coercion (live-data 500) |
+| `f9d1feb` | Offense / rule / coverage frontend |
+
+Two production bugs found by real data:
+
+- **`GET /offenses/analytics` 500'd** on any instance with offenses. `CountEntry.key` is
+  typed `str`, but several distributions group by numeric columns. The mock provider never
+  produced a numeric grouping key, so nothing caught it.
+- **Audit correlation was silently destroyed.** `redact()` masks token-shaped values and a
+  UUID is token-shaped, so `correlation_id` and `instance_id` were written as
+  `***redacted***`. Exempting UUIDs by *value* was not an option — a QRadar SEC token is
+  itself a UUID — so the exemption is keyed on field name, covering exactly two names.
+
+### 11.5 Operating it
+
+```bash
+# register (idempotent)
+cd backend && python -m app.cli.qradar add --name qradarce2 \
+  --url https://<console> --token-file ../.secrets/qradar.sec \
+  --ca-file ../.secrets/qradar-ca.pem --api-version 29.0
+
+python -m app.cli.qradar list
+python -m app.cli.qradar test --name qradarce2
+
+# collect on demand (Beat also schedules all of these)
+python -m app.cli.sync all --instance qradarce2 [--json]
+```
+
+Beat entries: `sync-log-sources`, `collect-offenses`, `sync-rule-inventory`,
+`evaluate-rule-health`, `evaluate-detection-coverage`. Every interval is configurable;
+see `.env.example`. Building blocks are covered by `sync_rule_inventory` — `RuleCollector`
+merges both endpoints into one locked pass, so a separate task would double the upstream
+fetch and self-contend on the advisory lock.
+
+---
+
+## 12. Remaining work
+
+Ordered by what unblocks the most.
+
+1. **Compose stack verification — not done.** The slice was proven with host-side uvicorn
+   and `next start` against a containerised database. `docker compose up -d --build` with
+   all eight services has **not** been run this session. Secrets must be mounted as
+   read-only Docker secrets; SELinux stays enforcing and `:z`/`:Z` remain forbidden
+   (see §4.2).
+2. **Rule metrics from offense contribution.** The only honest firing evidence available
+   on 7.6.0. Derive `RuleMetric` from stored `offense_snapshot.rule_ids`, recording
+   provenance (`offense_contribution`) and completeness — it establishes only rules that
+   produced offenses, within the offense retention window, so it must not be presented as
+   total observation. This is what moves rules off `INSUFFICIENT_DATA`.
+3. **ATT&CK technique mappings.** Coverage reports `NOT_EVALUATED` until they exist.
+   `POST /api/v1/coverage/mappings` accepts them; there is no seed set.
+4. **`RuleCollector.sync` still has no dedicated tests** (§7a) — the largest
+   characterization gap, now also the most exercised code path.
+5. **Rule detail depth.** `/rules/[id]` shows metadata and health evidence; building-block
+   dependencies, telemetry dependencies and health history are not surfaced (and
+   dependencies are empty upstream anyway — §11.2).
+6. **Offense analytics visualisation.** `/offenses/analytics` returns aging buckets and
+   distributions that no page renders yet.
+7. The pre-existing items in §10 still stand.

@@ -162,8 +162,11 @@ class RuleCollector:
             extra={
                 "instance_id": str(instance.id),
                 "rules_seen": report.rules_seen,
-                "created": report.created,
-                "updated": report.updated,
+                # Not "created": LogRecord reserves that name for its own
+                # timestamp and logging raises KeyError rather than shadowing
+                # it, so this crashed rule sync wherever INFO was enabled.
+                "rows_created": report.created,
+                "rows_updated": report.updated,
                 "transitions": report.transitions_recorded,
                 "duration_ms": report.duration_ms,
             },

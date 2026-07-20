@@ -26,6 +26,13 @@ x-backend-build: &backend-build
   networks: [internal]
   logging: *json-logging
   restart: unless-stopped
+  # Compose mounts secrets read-only at /run/secrets/<name>. Point
+  # QRADAR_API_TOKEN_FILE and QRADAR_CA_BUNDLE at these paths rather than
+  # putting the token in .env: an environment variable is readable from /proc,
+  # shows up in `docker inspect`, and is captured by most crash reporters.
+  #
+  # No `:z`/`:Z` and no bind mount of the repository: SELinux stays enforcing.
+  secrets: [qradar_sec_token, qradar_ca.pem]
 
 services:
   # ---------------------------------------------------------------- database
@@ -173,6 +180,18 @@ services:
     networks: [edge]
     logging: *json-logging
     restart: unless-stopped
+
+# Host files mounted read-only into the containers that need them. Both are
+# git-ignored. Create them before `docker compose up` — see the README.
+#
+# qradar_ca.pem must contain the FULL trust path (root + intermediate): QRadar
+# presents only its leaf certificate, so an intermediate-only bundle fails with
+# "unable to get issuer certificate".
+secrets:
+  qradar_sec_token:
+    file: ./.secrets/qradar.sec
+  qradar_ca.pem:
+    file: ./.secrets/qradar-ca.pem
 
 volumes:
   postgres_data:

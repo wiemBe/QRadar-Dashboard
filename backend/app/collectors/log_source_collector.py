@@ -113,8 +113,13 @@ class LogSourceCollector:
             extra={
                 "instance_id": str(instance.id),
                 "log_sources_seen": report.log_sources_seen,
-                "created": report.created,
-                "updated": report.updated,
+                # Not "created"/"updated": LogRecord reserves `created` for its
+                # own timestamp, and logging raises KeyError rather than
+                # shadowing it. That only fires when the logger is actually
+                # enabled at INFO, so it hides from tests that leave logging at
+                # default level and shows up in production.
+                "rows_created": report.created,
+                "rows_updated": report.updated,
                 "duration_ms": report.duration_ms,
             },
         )

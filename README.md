@@ -227,15 +227,107 @@ mock provider.
 
 ### Connecting a real QRadar
 
+#### 1. Put the credentials on disk, not in the environment
+
+Create `.secrets/` (git-ignored) with the SEC token and the CA bundle. Do not
+pass the token on a command line — an argv element is visible in `ps` output
+and lands in shell history.
+
+```bash
+mkdir -p .secrets && chmod 700 .secrets
+read -rs QR_TOK && printf '%s' "$QR_TOK" > .secrets/qradar.sec && unset QR_TOK
+chmod 600 .secrets/qradar.sec
+```
+
+The CA bundle must contain the **whole** trust path the appliance does not
+send. QRadar presents only its leaf certificate, so a file holding just the
+intermediate fails with `unable to get issuer certificate` — concatenate the
+root and the intermediate into `.secrets/qradar-ca.pem`.
+
+Verify the chain before going further:
+
+```bash
+openssl s_client -connect qradar.your.internal:443 \
+  -CAfile .secrets/qradar-ca.pem -verify_return_error </dev/null 2>&1 | grep Verify
+# expect: Verify return code: 0 (ok)
+```
+
+#### 2. Configure the provider
+
 In `.env`:
 
 ```ini
 QRADAR_PROVIDER=rest
-QRADAR_HOST=https://qradar.your.internal
-QRADAR_SEC_TOKEN=<read-only authorized service token>
+QRADAR_BASE_URL=https://qradar.your.internal
+QRADAR_API_TOKEN_FILE=/run/secrets/qradar_sec_token   # preferred over QRADAR_SEC_TOKEN
 QRADAR_VERIFY_SSL=true
-QRADAR_CA_BUNDLE=/etc/ssl/certs/qradar-ca.pem   # if internal CA
+QRADAR_CA_BUNDLE=/run/secrets/qradar_ca.pem
 ```
+
+> **If TLS fails only from Python.** Python 3.13+ enables `VERIFY_X509_STRICT`
+> by default. QRadar's self-generated console certificate carries a Subject Key
+> Identifier but no Authority Key Identifier, which RFC 5280 §4.2.1.1 requires,
+> so strict mode rejects a chain the `openssl` CLI accepts. The symptom is
+> `SSLCertVerificationError: Missing Authority Key Identifier` while the
+> `openssl` check above passes. Set `QRADAR_TLS_ALLOW_MISSING_AKI=true`. That
+> relaxes a certificate *labelling* assertion only — chain, expiry and
+> hostname/IP-SAN verification stay enforced, and it is not equivalent to
+> disabling verification, which this codebase refuses outright. The real fix is
+> to reissue the appliance certificate with an AKI.
+
+#### 3. Register the console
+
+Registration is idempotent by name — running it twice updates the existing
+instance rather than creating a second one.
+
+```bash
+cd backend
+python -m app.cli.qradar add \
+  --name qradarce2 \
+  --url https://qradar.your.internal \
+  --token-file ../.secrets/qradar.sec \
+  --ca-file ../.secrets/qradar-ca.pem \
+  --api-version 29.0
+```
+
+The token is encrypted at rest with `ENCRYPTION_KEY` and is never returned by
+any API. `add` finishes with a live connection check; `--no-verify` skips it.
+
+```bash
+python -m app.cli.qradar list          # registered consoles
+python -m app.cli.qradar test --name qradarce2
+```
+
+#### 4. Collect
+
+Beat runs these on a schedule, but you do not have to wait for it:
+
+```bash
+python -m app.cli.sync log-sources --instance qradarce2
+python -m app.cli.sync offenses    --instance qradarce2
+python -m app.cli.sync rules       --instance qradarce2   # rules AND building blocks
+python -m app.cli.sync rule-health --instance qradarce2
+python -m app.cli.sync coverage    --instance qradarce2
+python -m app.cli.sync all         --instance qradarce2   # in dependency order
+```
+
+Every sync is idempotent: re-running creates no duplicate rows, and a failed
+run does not advance its watermark. Add `--json` for machine-readable output.
+
+Then open <http://localhost:3000/offenses>, `/rules` and `/coverage`.
+
+#### A note on what rule health can honestly report
+
+QRadar's `/analytics/rules` endpoint returns no last-triggered timestamp, no
+building-block references and no log-source-type references, and there is no
+rule-statistics endpoint. So for a rule that has produced no offense, the
+platform has **no evidence either way** about whether it has ever fired.
+
+Such rules are reported as `INSUFFICIENT_DATA`, never as `NEVER_OBSERVED`.
+That distinction is deliberate: reporting a collection gap as a detection gap
+is the exact confusion this platform exists to remove. For the same reason,
+detection coverage shows `NOT_EVALUATED` rather than 0% until ATT&CK technique
+mappings exist.
 
 To also enable the MCP service (inventory / future AI), copy
 `deploy/mcp/config.json.example` → `deploy/mcp/config.json`, fill in the read-only token, and start
