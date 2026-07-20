@@ -58,4 +58,29 @@ celery_app.conf.beat_schedule = {
         "task": "rebuild_baselines",
         "schedule": 86400.0,
     },
+    # --- Phase 3 -------------------------------------------------------------
+    # Every interval below is configurable; none is a hardcoded production
+    # cadence. Ordering matters: inventory feeds health, health feeds coverage,
+    # so each runs no more often than what it depends on.
+    "sync-log-sources": {
+        "task": "sync_log_sources",
+        "schedule": float(settings.log_source_sync_interval_seconds),
+    },
+    "collect-offenses": {
+        "task": "collect_offenses",
+        "schedule": float(settings.offense_collection_interval_seconds),
+    },
+    "sync-rule-inventory": {
+        # Also covers building blocks: RuleCollector merges both endpoints.
+        "task": "sync_rule_inventory",
+        "schedule": float(settings.rule_collection_interval_seconds),
+    },
+    "evaluate-rule-health": {
+        "task": "evaluate_rule_health",
+        "schedule": float(settings.rule_health_evaluation_interval_seconds),
+    },
+    "evaluate-detection-coverage": {
+        "task": "evaluate_detection_coverage",
+        "schedule": float(settings.coverage_evaluation_interval_seconds),
+    },
 }

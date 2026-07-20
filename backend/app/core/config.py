@@ -138,6 +138,11 @@ class Settings(BaseSettings):
     collection_max_backfill_intervals: int = Field(default=12, ge=0)
     collection_advisory_lock_namespace: int = 4711
 
+    # --- Log source inventory (Phase 3) -------------------------------------
+    # Full inventory pass; log sources are added and renamed rarely, so this is
+    # deliberately far less frequent than metric collection.
+    log_source_sync_interval_seconds: int = Field(default=3600, ge=60)
+
     # --- Offense collection (Phase 3) ---------------------------------------
     offense_collection_interval_seconds: int = Field(default=300, ge=60)
     # Pages of offenses walked per run. Bounds a single collection cycle so a
@@ -174,6 +179,9 @@ class Settings(BaseSettings):
     # Bumped whenever classification logic changes meaning, so historical
     # snapshots stay interpretable. Not operator-tunable in practice.
     rule_health_logic_version: int = 1
+    # Health classification reads only stored data, so it can run more often
+    # than the inventory sync that feeds it.
+    rule_health_evaluation_interval_seconds: int = Field(default=1800, ge=60)
 
     # --- Detection coverage (Phase 3) ---------------------------------------
     coverage_evaluation_interval_seconds: int = Field(default=3600, ge=60)
