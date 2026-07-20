@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      # Real PostgreSQL + TimescaleDB for the integration suite and the
+      # migration-drift check.
+      test-db:
+        image: timescale/timescaledb:2.17.2-pg16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: qradar_obs_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d qradar_obs_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      ENCRYPTION_KEY: sxvVvbfjEG8mA0m2m6b1cQ2E0N4l7rXqO4uJ6c8zY5A=
+      QRADAR_PROVIDER: mock
+      TEST_DATABASE_URL: postgresql+asyncpg://test:test@localhost:5433/qradar_obs_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Lint
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: Type check
+        working-directory: backend
+        run: mypy app || true   # advisory until fully annotated
+
+      - name: Prepare migration-check database
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5433"
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: qradar_obs_test
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Migration drift check (alembic check)
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5433"
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: qradar_obs_test
+        working-directory: backend
+        # Fails the build if models and migrations disagree.
+        run: alembic check
+
+      - name: Unit + integration tests
+        working-directory: backend
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        working-directory: frontend
+        run: npm install
+      - name: Type check
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api/v1
+        run: npm run build

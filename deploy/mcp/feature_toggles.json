@@ -1,0 +1,29 @@
+{
+  "_comment": "Mounted read-only over /opt/app-root/qradar-mcp/feature_toggles.json. Upstream ships POST+DELETE enabled; this file disables the entire write surface. See docs/mcp-capability-matrix.md section 3 for what each verb unlocks.",
+  "verb_toggles": {
+    "GET": true,
+    "POST": false,
+    "DELETE": false
+  },
+  "group_toggles": {
+    "log_source": true,
+    "analytics": true,
+    "offense": true,
+    "system": true,
+    "config": true,
+    "data_classification": true,
+    "asset": true,
+    "ariel": true,
+    "reference_data": true,
+    "services": false,
+    "forensics": false,
+    "qvm": false
+  },
+  "per_tool_toggles": {},
+  "resource_toggles": {
+    "aql_events_fields": true,
+    "aql_flows_fields": true,
+    "aql_functions": true,
+    "aql_generation_guide": true
+  }
+}

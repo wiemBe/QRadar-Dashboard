@@ -1,0 +1,22 @@
+{
+  "_comment": "Mounted read-only over /opt/app-root/qradar-mcp/config.json. Overrides two unsafe upstream defaults: verify_ssl=false and debug=true. Copy to config.json and inject the read-only authorized service token.",
+  "qradar": {
+    "host": "qradar.example.internal",
+    "sec_token": "",
+    "csrf_token": "",
+    "authorized_service_token": "",
+    "app_id": "",
+    "verify_ssl": true,
+    "proxy": null
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "debug": false
+  },
+  "httpx": {
+    "max_keepalive_connections": 10,
+    "max_connections": 30,
+    "timeout": 60.0
+  }
+}

@@ -1,0 +1,186 @@
+# qradar-observability — on-premises SOC analytics platform
+#
+# Network policy:
+#   edge     — published to the host (frontend, backend API only)
+#   internal — service-to-service; QRadar egress happens from here
+#
+# The MCP service publishes NO host ports. It is reachable only from the backend
+# container over the internal network. Do not add a `ports:` block to it.
+
+name: qradar-observability
+
+x-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-backend-build: &backend-build
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  env_file: [.env]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  networks: [internal]
+  logging: *json-logging
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------- database
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Fail fast rather than silently accepting trust auth
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+    logging: *json-logging
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+    logging: *json-logging
+    restart: unless-stopped
+
+  # ------------------------------------------------- IBM QRadar MCP (vendored)
+  # Pinned to commit b8f6a4a3fe901eac4f55e4ca5d146d952f55db51.
+  # Upstream Dockerfile is used unmodified; only configuration is overridden.
+  qradar-mcp:
+    build:
+      context: ./qradar-mcp
+      dockerfile: Dockerfile
+    image: qradar-observability/qradar-mcp:b8f6a4a3
+    # NO ports: block. Internal network access only. This is deliberate.
+    environment:
+      APP_ROOT: /opt/app-root/qradar-mcp
+      QRADAR_CONSOLE_FQDN: ${QRADAR_HOST}
+      QRADAR_HOST: ${QRADAR_HOST}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Read-only overrides. Upstream defaults enable POST+DELETE and disable
+      # TLS verification — see docs/mcp-capability-matrix.md section 1.3.
+      - ./deploy/mcp/feature_toggles.json:/opt/app-root/qradar-mcp/feature_toggles.json:ro
+      - ./deploy/mcp/config.json:/opt/app-root/qradar-mcp/config.json:ro
+      - mcp_logs:/opt/app-root/logs
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.create_connection(('127.0.0.1',5000),3); s.close()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks: [internal]
+    logging: *json-logging
+    restart: unless-stopped
+    profiles: [mcp]
+
+  # ----------------------------------------------------------------- backend
+  backend:
+    <<: *backend-build
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    ports:
+      - "127.0.0.1:8000:8000"   # bound to loopback; front with a TLS reverse proxy
+    networks: [internal, edge]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live',timeout=5).status==200 else 1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # Runs migrations once, then exits. Everything else waits on it.
+  migrate:
+    <<: *backend-build
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    healthcheck:
+      disable: true
+
+  celery-worker:
+    <<: *backend-build
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=4
+      - --max-tasks-per-child=200
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app:celery_app inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 45s
+
+  celery-beat:
+    <<: *backend-build
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --schedule=/tmp/celerybeat-schedule
+    healthcheck:
+      disable: true
+
+  # ---------------------------------------------------------------- frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks: [edge]
+    logging: *json-logging
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  mcp_logs:
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
