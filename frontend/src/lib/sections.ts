@@ -16,9 +16,9 @@ export const SECTIONS: Section[] = [
   { slug: "searches/trend", label: "Search Detail & Trend", phase: 2, live: true },
   { slug: "anomalies", label: "Anomalies", phase: 2, live: true },
   { slug: "alerts", label: "Alerts", phase: 2, live: true },
-  { slug: "offenses", label: "Offenses", phase: 3, live: false },
-  { slug: "rules", label: "Rule Health", phase: 3, live: false },
-  { slug: "coverage", label: "Detection Coverage", phase: 3, live: false },
+  { slug: "offenses", label: "Offenses", phase: 3, live: true },
+  { slug: "rules", label: "Rule Health", phase: 3, live: true },
+  { slug: "coverage", label: "Detection Coverage", phase: 3, live: true },
   { slug: "config-changes", label: "Configuration Changes", phase: 3, live: false },
   { slug: "admin", label: "Administration", phase: 4, live: false },
 ];

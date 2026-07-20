@@ -85,3 +85,42 @@ button.action.secondary { background: var(--panel-2); color: var(--text); border
 
 /* Chart surface: the ECharts instance sizes itself to this box. */
 .chart { width: 100%; height: 320px; }
+
+/* --- Phase 3: offenses, rule health, detection coverage ------------------- */
+
+/* `.notice` is a centred empty-state box; when it carries explanatory prose
+   about why data is absent, left-align it so the text stays readable. */
+.notice p { text-align: left; margin: 8px 0 0; }
+.notice strong { color: var(--text); }
+
+.muted { color: var(--muted); }
+
+/* GET filter forms. Plain forms, so filtering needs no client JavaScript and
+   the resulting URL stays shareable. */
+.filters {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 16px;
+}
+.filters input[type="search"], .filters select {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px;
+}
+.filters input[type="search"] { min-width: 280px; flex: 1 1 280px; }
+.filters button {
+  background: var(--accent); color: white; border: none; border-radius: 8px;
+  padding: 8px 14px; cursor: pointer; font-size: 13px;
+}
+
+.pagination {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 16px; margin: 16px 0 0; font-size: 13px;
+}
+.pagination-links { display: flex; gap: 16px; }
+
+/* Entity lists on the offense detail view. */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0; }
+
+.detail-grid {
+  display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.detail-block h4 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--muted); }

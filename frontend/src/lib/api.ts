@@ -194,6 +194,145 @@ export interface Notification {
   error_message: string | null;
 }
 
+// --- Phase 3 types ---------------------------------------------------------
+// Every list endpoint returns this envelope; the pages page through it rather
+// than fetching an unbounded list.
+export interface Page<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface OffenseSummary {
+  instance_id: string;
+  qradar_offense_id: number;
+  captured_at: string;
+  description: string | null;
+  status: string;
+  magnitude: number | null;
+  severity: number | null;
+  credibility: number | null;
+  relevance: number | null;
+  assigned_to: string | null;
+  is_assigned: boolean;
+  offense_type_name: string | null;
+  offense_source: string | null;
+  source_network: string | null;
+  event_count: number | null;
+  flow_count: number | null;
+  source_count: number | null;
+  destination_count: number | null;
+  start_time: string | null;
+  last_updated_time: string | null;
+  close_time: string | null;
+  age_seconds: number | null;
+  categories: string[];
+}
+
+export interface OffenseDetail extends OffenseSummary {
+  usernames: string[];
+  source_addresses: string[];
+  local_destination_addresses: string[];
+  rule_ids: number[];
+  log_source_ids: number[];
+  destination_networks: string[];
+}
+
+export interface OffenseHistoryPoint {
+  captured_at: string;
+  status: string;
+  magnitude: number | null;
+  severity: number | null;
+  event_count: number | null;
+  assigned_to: string | null;
+}
+
+export interface OffenseAggregates {
+  active: number;
+  critical: number;
+  unassigned: number;
+  exceeding_sla: number;
+  oldest_age_seconds: number | null;
+  average_magnitude: number | null;
+  sla_hours: number;
+  critical_magnitude: number;
+}
+
+export interface CountEntry {
+  key: string;
+  count: number;
+}
+
+export interface AgingBucket {
+  bucket: string;
+  count: number;
+}
+
+export interface OffenseAnalytics {
+  generated_at: string;
+  aggregates: OffenseAggregates;
+  aging: AgingBucket[];
+  status_distribution: CountEntry[];
+  magnitude_distribution: CountEntry[];
+  category_distribution: CountEntry[];
+  assignment_distribution: CountEntry[];
+  top_rules: CountEntry[];
+  top_usernames: CountEntry[];
+  top_source_ips: CountEntry[];
+  top_destination_ips: CountEntry[];
+}
+
+export interface RuleSummary {
+  id: string;
+  qradar_id: number;
+  name: string;
+  enabled: boolean;
+  is_building_block: boolean;
+  rule_type: string | null;
+  origin: string | null;
+  owner: string | null;
+  health_status: string | null;
+  health_evaluated_at: string | null;
+  last_fired_at: string | null;
+  offense_contribution_count: number;
+  event_contribution_count: number;
+  mitre_techniques: string[];
+}
+
+export interface RuleHealthCount {
+  status: string;
+  count: number;
+}
+
+export interface CoverageSummary {
+  generated_at: string;
+  total_techniques: number;
+  by_status: Record<string, number>;
+  covered_ratio: number;
+  average_coverage_score: number;
+  mapping_provenance: { explicit: number; inferred: number };
+}
+
+export interface TechniqueCoverage {
+  technique_id: string;
+  technique_name: string | null;
+  tactic: string | null;
+  status: string;
+  coverage_score: number | null;
+  confidence: number | null;
+  reason: string | null;
+  rule_count: number;
+  evaluated_at: string | null;
+}
+
+function qs(params: Record<string, string | number | boolean | undefined>): string {
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join("&")}` : "";
+}
+
 export const api = {
   overview: () => request<SocOverview>("/overview"),
   logSources: () => request<LogSourceSummary[]>("/log-sources"),
@@ -221,6 +360,38 @@ export const api = {
     request<Alert[]>(`/alerts${status ? `?status=${status}` : ""}`),
   alert: (id: string) => request<Alert>(`/alerts/${id}`),
   alertNotifications: (id: string) => request<Notification[]>(`/alerts/${id}/notifications`),
+
+  // --- Phase 3: offenses, rules, coverage ----------------------------------
+  // All read-only. There is deliberately no offense mutation call here: the
+  // backend exposes none, and QRadar stays read-only.
+  offenses: (params: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    status?: string;
+    sort?: string;
+  } = {}) => request<Page<OffenseSummary>>(`/offenses${qs(params)}`),
+  offense: (id: number) => request<OffenseDetail>(`/offenses/${id}`),
+  offenseHistory: (id: number) =>
+    request<OffenseHistoryPoint[]>(`/offenses/${id}/history`),
+  offenseAggregates: () => request<OffenseAggregates>("/offenses/aggregates"),
+  offenseAnalytics: () => request<OffenseAnalytics>("/offenses/analytics"),
+
+  rules: (params: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    health_status?: string;
+    enabled?: boolean;
+  } = {}) => request<Page<RuleSummary>>(`/rules${qs(params)}`),
+  rule: (id: string) => request<RuleSummary>(`/rules/${id}`),
+  ruleHealthSummary: () => request<RuleHealthCount[]>("/rules/health-summary"),
+
+  coverageSummary: () => request<CoverageSummary>("/coverage/summary"),
+  coverageTechniques: (params: { limit?: number; offset?: number } = {}) =>
+    request<Page<TechniqueCoverage>>(`/coverage/techniques${qs(params)}`),
+  coverageDegraded: () => request<Page<TechniqueCoverage>>("/coverage/degraded"),
+  coverageMissing: () => request<Page<TechniqueCoverage>>("/coverage/missing"),
 
   acknowledgeAlert: (id: string) =>
     request<Alert>(`/alerts/${id}/acknowledge`, { method: "POST" }),
