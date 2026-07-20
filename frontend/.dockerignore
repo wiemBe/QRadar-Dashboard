@@ -1,0 +1,13 @@
+# Host build artefacts must never enter the image context: node_modules is
+# compiled against the host's libc and would shadow the deps stage, and a stale
+# .next silently wins over the one `npm run build` produces.
+node_modules
+.next
+tsconfig.tsbuildinfo
+
+Dockerfile
+.dockerignore
+
+# Tests do not run in the image.
+vitest.config.ts
+vitest.setup.ts

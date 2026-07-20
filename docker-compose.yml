@@ -26,18 +26,28 @@ x-backend-build: &backend-build
   networks: [internal]
   logging: *json-logging
   restart: unless-stopped
-  # Compose mounts secrets read-only at /run/secrets/<name>. Point
+  # Secrets are mounted read-only at /run/secrets/<name>. Point
   # QRADAR_API_TOKEN_FILE and QRADAR_CA_BUNDLE at these paths rather than
   # putting the token in .env: an environment variable is readable from /proc,
   # shows up in `docker inspect`, and is captured by most crash reporters.
   #
-  # No `:z`/`:Z` and no bind mount of the repository: SELinux stays enforcing.
-  secrets: [qradar_sec_token, qradar_ca.pem]
+  # This is a named volume, NOT Compose's `secrets:` mechanism, which bind-mounts
+  # from the repository. On an SELinux-enforcing host those files are user_home_t
+  # and unreadable by any container process — and the fix for that would be a
+  # `:z`/`:Z` relabel of the host tree. Populate the volume with
+  # ./deploy/load-secrets.sh before the first `up`.
+  volumes:
+    - qradar_secrets:/run/secrets:ro
 
 services:
   # ---------------------------------------------------------------- database
   postgres:
-    image: timescale/timescaledb:2.17.2-pg16
+    # Thin layer over timescale/timescaledb that bakes in deploy/postgres/init.
+    # See deploy/postgres/Dockerfile for why it is not a bind mount.
+    build:
+      context: ./deploy/postgres
+      dockerfile: Dockerfile
+    image: qradar-observability/postgres:2.17.2-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -47,7 +57,6 @@ services:
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -83,8 +92,11 @@ services:
     # NO ports: block. Internal network access only. This is deliberate.
     environment:
       APP_ROOT: /opt/app-root/qradar-mcp
-      QRADAR_CONSOLE_FQDN: ${QRADAR_HOST}
-      QRADAR_HOST: ${QRADAR_HOST}
+      # Bare hostname, not a URL. Deliberately NOT ${QRADAR_HOST}: the backend
+      # accepts QRADAR_HOST as an alias for QRADAR_BASE_URL and rejects any
+      # value without an https:// scheme, so the two cannot share a variable.
+      QRADAR_CONSOLE_FQDN: ${QRADAR_CONSOLE_FQDN}
+      QRADAR_HOST: ${QRADAR_CONSOLE_FQDN}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PYTHONUNBUFFERED: "1"
     volumes:
@@ -181,22 +193,22 @@ services:
     logging: *json-logging
     restart: unless-stopped
 
-# Host files mounted read-only into the containers that need them. Both are
-# git-ignored. Create them before `docker compose up` — see the README.
-#
-# qradar_ca.pem must contain the FULL trust path (root + intermediate): QRadar
-# presents only its leaf certificate, so an intermediate-only bundle fails with
-# "unable to get issuer certificate".
-secrets:
-  qradar_sec_token:
-    file: ./.secrets/qradar.sec
-  qradar_ca.pem:
-    file: ./.secrets/qradar-ca.pem
-
 volumes:
   postgres_data:
   redis_data:
   mcp_logs:
+  # Holds qradar_sec_token and qradar_ca.pem, mounted read-only at /run/secrets.
+  # Populated out of band by ./deploy/load-secrets.sh from the git-ignored
+  # ./.secrets directory — see the note on the backend anchor above.
+  #
+  # qradar_ca.pem must contain the FULL trust path (root + intermediate): QRadar
+  # presents only its leaf certificate, so an intermediate-only bundle fails
+  # with "unable to get issuer certificate".
+  qradar_secrets:
+    # External so that `docker compose down -v` cannot wipe the credentials
+    # along with the data volumes. Reload with ./deploy/load-secrets.sh.
+    external: true
+    name: qradar-observability-secrets
 
 networks:
   edge:

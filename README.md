@@ -244,6 +244,20 @@ send. QRadar presents only its leaf certificate, so a file holding just the
 intermediate fails with `unable to get issuer certificate` — concatenate the
 root and the intermediate into `.secrets/qradar-ca.pem`.
 
+Then load both into the `qradar-observability-secrets` volume, which is what the
+containers actually mount at `/run/secrets`:
+
+```bash
+./deploy/load-secrets.sh
+```
+
+`.secrets/` is **not** bind-mounted. On an SELinux-enforcing host the repository
+is labelled `user_home_t` and no container process can read it — not even root
+in the container — and the usual `:z`/`:Z` fix would relabel the host tree as a
+side effect. The script streams the files into a named volume over stdin, so no
+host label changes. Re-run it after rotating either file; the volume is declared
+`external`, so `docker compose down -v` will not wipe your credentials.
+
 Verify the chain before going further:
 
 ```bash
@@ -275,7 +289,26 @@ QRADAR_CA_BUNDLE=/run/secrets/qradar_ca.pem
 > disabling verification, which this codebase refuses outright. The real fix is
 > to reissue the appliance certificate with an AKI.
 
-#### 3. Register the console
+#### 3. If QRadar is a libvirt VM, put the containers on its segment
+
+Skip this unless the appliance is a VM on a libvirt bridge. The symptom is a
+container that gets `ECONNREFUSED` reaching QRadar while the host connects
+fine — libvirt installs a `FORWARD ... -j REJECT` rule that drops traffic
+arriving from other bridges, so the Compose bridge cannot route to the VM.
+
+Rather than change the host firewall, attach the QRadar-facing services to a
+macvlan over the libvirt bridge. Edit the interface and subnet in the script to
+match `ip -br addr show virbr0`, then:
+
+```bash
+./deploy/create-vmnet.sh
+```
+
+and add a `docker-compose.override.yml` putting `backend`, `celery-worker`,
+`celery-beat` and `migrate` on that network. The override is git-ignored: it
+encodes one machine's network layout, not the project's topology.
+
+#### 4. Register the console
 
 Registration is idempotent by name — running it twice updates the existing
 instance rather than creating a second one.
@@ -298,7 +331,7 @@ python -m app.cli.qradar list          # registered consoles
 python -m app.cli.qradar test --name qradarce2
 ```
 
-#### 4. Collect
+#### 5. Collect
 
 Beat runs these on a schedule, but you do not have to wait for it:
 

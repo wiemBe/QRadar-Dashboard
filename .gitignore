@@ -34,3 +34,6 @@ next-env.d.ts
 logs/
 *.log
 postgres_data/
+
+# Host-specific compose overlay (libvirt/macvlan layout of one machine).
+docker-compose.override.yml
