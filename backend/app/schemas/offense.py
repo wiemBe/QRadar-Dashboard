@@ -101,8 +101,24 @@ class OffenseAggregates(BaseModel):
 
 
 class CountEntry(BaseModel):
+    """One (label, count) pair from a grouped aggregation.
+
+    `key` is a display label, so it is always rendered as a string even when the
+    underlying column is not one. Several distributions group by numeric columns
+    — magnitude, severity — and QRadar entity lists mix ints (rule ids) with
+    strings (usernames, addresses). Without this coercion the endpoint 500s the
+    moment a real appliance returns a numeric grouping key.
+    """
+
     key: str
     count: int
+
+    @field_validator("key", mode="before")
+    @classmethod
+    def _stringify_key(cls, v: object) -> str:
+        # None is a real grouping outcome (e.g. unassigned offenses) and must
+        # stay distinguishable from the literal string "None".
+        return "" if v is None else str(v)
 
 
 class AgingBucket(BaseModel):
