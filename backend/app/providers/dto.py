@@ -86,22 +86,33 @@ class OffenseDTO(ProviderDTO):
     relevance: int | None = None
     assigned_to: str | None = None
     offense_type: int | None = None
+    offense_type_name: str | None = None
     offense_source: str | None = None
+    source_network: str | None = None
     event_count: int | None = None
     flow_count: int | None = None
     device_count: int | None = None
+    # QRadar reports these as counts independently of the (capped) address
+    # lists, so a wide offense still reports its true breadth.
+    source_count: int | None = None
+    destination_count: int | None = None
     start_time: datetime | None = None
     last_updated_time: datetime | None = None
+    close_time: datetime | None = None
     closing_reason_id: int | None = None
+    closing_reason: str | None = None
     categories: list[str] = Field(default_factory=list)
     source_addresses: list[str] = Field(default_factory=list)
     local_destination_addresses: list[str] = Field(default_factory=list)
+    usernames: list[str] = Field(default_factory=list)
+    log_source_ids: list[int] = Field(default_factory=list)
     rule_ids: list[int] = Field(default_factory=list)
 
 
 class AnalyticsRuleDTO(ProviderDTO):
     qradar_id: int
     name: str
+    description: str | None = None
     rule_type: str | None = None
     enabled: bool = True
     origin: str | None = None
@@ -110,7 +121,23 @@ class AnalyticsRuleDTO(ProviderDTO):
     average_capacity: float | None = None
     categories: list[str] = Field(default_factory=list)
     mitre_techniques: list[str] = Field(default_factory=list)
+    created_at: datetime | None = None
     modified_at: datetime | None = None
+
+    # Whether the rule's response configuration creates/dispatches an offense.
+    # A rule that fires but generates no offense is a real and distinct state
+    # from one that never fires, and rule health must not conflate them.
+    generates_offense: bool | None = None
+    response_actions: list[str] = Field(default_factory=list)
+    # Building blocks this rule tests. QRadar exposes rule dependencies only
+    # partially; anything the provider could not establish authoritatively is
+    # reported separately as an inference by the collector, never merged here.
+    building_block_ids: list[int] = Field(default_factory=list)
+    log_source_type_ids: list[int] = Field(default_factory=list)
+
+    last_triggered_at: datetime | None = None
+    event_contribution_count: int | None = None
+    offense_contribution_count: int | None = None
 
 
 class ArielSearchHandleDTO(ProviderDTO):

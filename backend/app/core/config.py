@@ -112,6 +112,56 @@ class Settings(BaseSettings):
     collection_max_backfill_intervals: int = Field(default=12, ge=0)
     collection_advisory_lock_namespace: int = 4711
 
+    # --- Offense collection (Phase 3) ---------------------------------------
+    offense_collection_interval_seconds: int = Field(default=300, ge=60)
+    # Pages of offenses walked per run. Bounds a single collection cycle so a
+    # large offense backlog cannot turn one tick into an unbounded crawl.
+    offense_max_pages: int = Field(default=20, ge=1, le=500)
+    offense_page_size: int = Field(default=100, ge=1, le=1000)
+    # Hard ceiling on how far back a first run or a gap-fill reaches. Never
+    # unlimited: a fresh install must not try to ingest years of offenses.
+    offense_max_backfill_hours: int = Field(default=168, ge=1, le=8760)
+    # An open offense older than this is "exceeding SLA" on the dashboard.
+    offense_sla_hours: int = Field(default=24, ge=1)
+    # Magnitude at or above which an offense counts as critical.
+    offense_critical_magnitude: int = Field(default=7, ge=1, le=10)
+
+    # --- Rule inventory + health (Phase 3) ----------------------------------
+    rule_collection_interval_seconds: int = Field(default=3600, ge=60)
+    rule_max_pages: int = Field(default=20, ge=1, le=500)
+    # Evaluation window for "has this rule fired recently".
+    rule_health_window_days: int = Field(default=30, ge=1, le=365)
+    # A rule newer than this is INSUFFICIENT_DATA, never INACTIVE: a detection
+    # deployed yesterday has not had a chance to fire yet.
+    rule_health_grace_period_days: int = Field(default=7, ge=0, le=365)
+    # Minimum observed history before an inactivity verdict is trustworthy.
+    rule_health_min_history_days: int = Field(default=3, ge=0, le=365)
+    # Silence beyond this many days, for a rule that has fired before.
+    rule_health_inactivity_days: int = Field(default=14, ge=1, le=365)
+    # Firings per day above which a rule is NOISY, unless the rule carries its
+    # own expected_daily_firings.
+    rule_health_noisy_daily_firings: float = Field(default=500.0, ge=1.0)
+    # Consecutive evaluations agreeing before the stored verdict flips. Rule
+    # health drives alerting, and a rule that fires irregularly would otherwise
+    # oscillate between HEALTHY and INACTIVE every evaluation.
+    rule_health_flap_threshold: int = Field(default=2, ge=1, le=10)
+    # Bumped whenever classification logic changes meaning, so historical
+    # snapshots stay interpretable. Not operator-tunable in practice.
+    rule_health_logic_version: int = 1
+
+    # --- Detection coverage (Phase 3) ---------------------------------------
+    coverage_evaluation_interval_seconds: int = Field(default=3600, ge=60)
+    # Inferred mappings below this confidence are recorded but never counted
+    # toward coverage.
+    coverage_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    coverage_logic_version: int = 1
+
+    # --- API guardrails -----------------------------------------------------
+    api_default_page_size: int = Field(default=50, ge=1, le=500)
+    api_max_page_size: int = Field(default=200, ge=1, le=1000)
+    # Widest date range any list/history endpoint will honour.
+    api_max_range_days: int = Field(default=365, ge=1)
+
     # --- Baselines ----------------------------------------------------------
     baseline_min_samples: int = Field(default=8, ge=1)
     baseline_lookback_days: int = Field(default=28, ge=1)

@@ -56,21 +56,37 @@ class OffenseSnapshot(Base):
     is_assigned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     offense_type: Mapped[int | None] = mapped_column(Integer)
+    offense_type_name: Mapped[str | None] = mapped_column(String(255))
     offense_source: Mapped[str | None] = mapped_column(String(255))
+    source_network: Mapped[str | None] = mapped_column(String(255))
     event_count: Mapped[int | None] = mapped_column(BigInteger)
     flow_count: Mapped[int | None] = mapped_column(BigInteger)
     device_count: Mapped[int | None] = mapped_column(Integer)
+    # QRadar's own breadth counters. The address lists below are capped at
+    # collection time, so these are the only trustworthy totals.
+    source_count: Mapped[int | None] = mapped_column(Integer)
+    destination_count: Mapped[int | None] = mapped_column(Integer)
 
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_updated_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    close_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Computed at capture time so aging buckets do not require a per-row
     # date subtraction at query time.
     age_seconds: Mapped[int | None] = mapped_column(BigInteger)
 
     closing_reason_id: Mapped[int | None] = mapped_column(Integer)
+    closing_reason: Mapped[str | None] = mapped_column(String(512))
     categories: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     source_addresses: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     local_destination_addresses: Mapped[list[str]] = mapped_column(
         JSONB, default=list, nullable=False
     )
+    usernames: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    log_source_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, nullable=False)
     rule_ids: Mapped[list[int]] = mapped_column(JSONB, default=list, nullable=False)
+
+    # Hash over the meaningful fields only (timestamps of *capture* excluded).
+    # A new snapshot row is written only when this changes, so a stable offense
+    # polled every five minutes produces one row, not 288 a day. The offense
+    # history view is therefore a list of genuine state changes.
+    content_hash: Mapped[str | None] = mapped_column(String(64))

@@ -118,10 +118,65 @@ class ChangeType(StrEnum):
 
 
 class CoverageStatus(StrEnum):
+    """Coverage of a MITRE technique by live, working detection.
+
+    MISSING and NOT_EVALUATED are deliberately distinct: "we have no rule for
+    this" and "we have not looked" are different findings, and collapsing them
+    would let an unevaluated technique masquerade as a known gap. NOT_COVERED is
+    retained as the Phase 1 spelling of MISSING so historical rows keep meaning.
+    """
+
     COVERED = "COVERED"
     PARTIAL = "PARTIAL"
-    NOT_COVERED = "NOT_COVERED"
     DEGRADED = "DEGRADED"
+    MISSING = "MISSING"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    NOT_COVERED = "NOT_COVERED"  # legacy alias for MISSING; not emitted in Phase 3
+
+
+class RuleHealthStatus(StrEnum):
+    """Why a rule is or is not currently producing detection value.
+
+    Each value answers a different operator question and drives a different
+    action, so they must never be collapsed into a boolean:
+
+      HEALTHY             — firing within expectation.
+      NEVER_OBSERVED      — enabled, past its grace period, has never fired.
+      INACTIVE            — has fired historically but not within the window.
+      NOISY               — firing far above the configured expectation.
+      DISABLED            — intentionally off in QRadar; not a fault.
+      DEPENDENCY_DEGRADED — its required telemetry is unhealthy, so silence is
+                            not evidence about the rule itself.
+      INSUFFICIENT_DATA   — too new, or too little history, to judge.
+      UNKNOWN             — evaluation could not be completed.
+    """
+
+    HEALTHY = "HEALTHY"
+    NEVER_OBSERVED = "NEVER_OBSERVED"
+    INACTIVE = "INACTIVE"
+    NOISY = "NOISY"
+    DISABLED = "DISABLED"
+    DEPENDENCY_DEGRADED = "DEPENDENCY_DEGRADED"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    UNKNOWN = "UNKNOWN"
+
+
+class MappingSource(StrEnum):
+    """Provenance of a rule/technique/dependency mapping.
+
+    EXPLICIT mappings are SOC-owned and authoritative. INFERRED mappings are
+    derived by the platform from rule text or configuration and are always
+    reported as inferences carrying a confidence — never presented as fact.
+    """
+
+    EXPLICIT = "EXPLICIT"
+    INFERRED = "INFERRED"
+
+
+class RuleDependencyKind(StrEnum):
+    BUILDING_BLOCK = "BUILDING_BLOCK"
+    LOG_SOURCE_TYPE = "LOG_SOURCE_TYPE"
+    LOG_SOURCE = "LOG_SOURCE"
 
 
 class InstanceStatus(StrEnum):

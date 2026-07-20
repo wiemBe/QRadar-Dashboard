@@ -3,7 +3,7 @@
 Guarantees:
   * Bounded batches — sources processed in configurable chunks.
   * No overlapping runs for the same instance: a PostgreSQL advisory lock keyed
-    on the instance is held for the duration; a second worker skips.
+    on (instance, collector) is held for the duration; a second worker skips.
   * Idempotent — metrics are upserted on (log_source_id, bucket_start), so
     re-collecting an interval overwrites rather than duplicates.
   * Explicit UTC interval boundaries — intervals are floored to the configured
@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from app.models.instance import QRadarInstance
 from app.models.log_source import LogSource, LogSourceMetric
 from app.models.monitoring import CollectionWatermark
 from app.providers.base import QRadarProvider
+from app.services.locks import CollectorAdvisoryLock
 
 COLLECTOR_NAME = "log_source_metric"
 
@@ -71,7 +72,9 @@ class MetricCollector:
         # The most recent *completed* interval is the one before the current.
         current_boundary = floor_to_interval(now, interval)
 
-        async with _AdvisoryLock(self.session, self.settings, instance.id) as acquired:
+        async with CollectorAdvisoryLock(
+            self.session, self.settings, instance.id, COLLECTOR_NAME
+        ) as acquired:
             if not acquired:
                 return CollectionReport(instance.id, 0, 0, skipped_locked=True)
 
@@ -192,41 +195,3 @@ class MetricCollector:
             self.session.add(wm)
             await self.session.flush()
         return wm
-
-
-class _AdvisoryLock:
-    """Session-level PG advisory lock scoped to an instance. Non-blocking:
-    returns False if another worker already holds it, so overlapping collection
-    runs are prevented rather than queued."""
-
-    def __init__(self, session: AsyncSession, settings: Settings, instance_id: uuid.UUID) -> None:
-        self.session = session
-        self._namespace = settings.collection_advisory_lock_namespace
-        # Second lock key: low 31 bits of the instance uuid.
-        self._key = int(instance_id.int & 0x7FFFFFFF)
-        self._acquired = False
-
-    async def __aenter__(self) -> bool:
-        bind = self.session.bind
-        # SQLite (unit tests) has no advisory locks; treat as always-acquired.
-        if bind is not None and bind.dialect.name != "postgresql":
-            self._acquired = True
-            return True
-        result = await self.session.execute(
-            text("SELECT pg_try_advisory_lock(:ns, :key)").bindparams(
-                ns=self._namespace, key=self._key
-            )
-        )
-        self._acquired = bool(result.scalar())
-        return self._acquired
-
-    async def __aexit__(self, *exc) -> None:
-        if not self._acquired:
-            return
-        bind = self.session.bind
-        if bind is not None and bind.dialect.name == "postgresql":
-            await self.session.execute(
-                text("SELECT pg_advisory_unlock(:ns, :key)").bindparams(
-                    ns=self._namespace, key=self._key
-                )
-            )

@@ -9,11 +9,16 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import create_engine, func, select, text
 
-from app.collectors.metric_collector import MetricCollector, floor_to_interval
+from app.collectors.metric_collector import (
+    COLLECTOR_NAME,
+    MetricCollector,
+    floor_to_interval,
+)
 from app.core.config import Settings
 from app.models.log_source import LogSourceMetric
 from app.providers.mock import MockQRadarProvider
 from app.services.inventory_sync import InventorySyncService
+from app.services.locks import collector_lock_key
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -85,7 +90,9 @@ async def test_bounded_backfill(db_session) -> None:
 async def test_advisory_lock_prevents_overlap(db_session) -> None:
     instance = await _seed_inventory(db_session)
     settings = _settings()
-    key = int(instance.id.int & 0x7FFFFFFF)
+    # Derive the key the same way the collector does; it is per
+    # (instance, collector) so collectors do not contend with each other.
+    key = collector_lock_key(instance.id, COLLECTOR_NAME)
 
     url = os.environ["TEST_DATABASE_URL"].replace("+asyncpg", "+psycopg")
     holder = create_engine(url, future=True)

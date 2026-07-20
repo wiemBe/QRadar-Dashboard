@@ -18,7 +18,16 @@ from app.models.log_source import (
 )
 from app.models.monitoring import CollectionWatermark
 from app.models.offense import OffenseSnapshot
-from app.models.rule import AnalyticsRule, DetectionCoverage, RuleMetric
+from app.models.rule import (
+    AnalyticsRule,
+    DetectionCoverage,
+    DetectionCoverageSnapshot,
+    RuleDependency,
+    RuleHealthSnapshot,
+    RuleMetric,
+    RuleStateTransition,
+    TechniqueMapping,
+)
 from app.models.search import (
     ScheduledSearch,
     SearchExecution,
@@ -33,6 +42,8 @@ HYPERTABLES: dict[str, str] = {
     "search_result_metric": "bucket_start",
     "rule_metric": "bucket_start",
     "offense_snapshot": "captured_at",
+    "rule_health_snapshot": "evaluated_at",
+    "detection_coverage_snapshot": "captured_at",
 }
 
 __all__ = [
@@ -46,6 +57,7 @@ __all__ = [
     "ConfigurationChange",
     "ConfigurationSnapshot",
     "DetectionCoverage",
+    "DetectionCoverageSnapshot",
     "LogSource",
     "LogSourceAnomaly",
     "LogSourceBaseline",
@@ -54,11 +66,15 @@ __all__ = [
     "OffenseSnapshot",
     "QRadarInstance",
     "Role",
+    "RuleDependency",
+    "RuleHealthSnapshot",
     "RuleMetric",
+    "RuleStateTransition",
     "ScheduledSearch",
     "SearchExecution",
     "SearchQueryVersion",
     "SearchResultMetric",
+    "TechniqueMapping",
     "User",
     "user_role",
 ]

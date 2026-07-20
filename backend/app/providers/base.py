@@ -119,10 +119,50 @@ class QRadarProvider(ABC):
     async def list_rules(self) -> list[AnalyticsRuleDTO]:
         ...
 
+    async def list_building_blocks(self) -> list[AnalyticsRuleDTO]:
+        """Building blocks, where the backend exposes them separately.
+
+        QRadar returns building blocks inside `list_rules` as well; a backend
+        with no distinct endpoint may return an empty list rather than fail.
+        """
+        self.require(ProviderCapability.INVENTORY)
+        return []
+
+    async def get_rule(self, qradar_id: int) -> AnalyticsRuleDTO | None:
+        self.require(ProviderCapability.INVENTORY)
+        raise NotImplementedError
+
+    async def validate_connection(self) -> InstanceInfoDTO:
+        """Prove credentials, TLS and reachability with one cheap call."""
+        return await self.get_instance_info()
+
     # -- offenses -----------------------------------------------------------
     @abstractmethod
-    async def list_offenses(self, *, open_only: bool = True) -> list[OffenseDTO]:
-        ...
+    async def list_offenses(
+        self,
+        *,
+        open_only: bool = True,
+        updated_since: datetime | None = None,
+        max_pages: int | None = None,
+    ) -> list[OffenseDTO]:
+        """Offenses, optionally narrowed to those updated since a watermark.
+
+        `updated_since` is what makes collection incremental; a backend that
+        cannot filter server-side must still honour it by filtering locally, so
+        callers can rely on the result never predating the watermark.
+        """
+
+    async def get_offense(self, qradar_id: int) -> OffenseDTO | None:
+        self.require(ProviderCapability.OFFENSES)
+        raise NotImplementedError
+
+    async def list_offense_types(self) -> dict[int, str]:
+        self.require(ProviderCapability.OFFENSES)
+        return {}
+
+    async def list_offense_closing_reasons(self) -> dict[int, str]:
+        self.require(ProviderCapability.OFFENSES)
+        return {}
 
     # -- AQL / Ariel (guarded by AQL_EXECUTION capability) ------------------
     async def create_ariel_search(self, aql: str) -> ArielSearchHandleDTO:

@@ -211,20 +211,40 @@ class MockQRadarProvider(QRadarProvider):
         return LogSourceMetricSample(**common)
 
     async def list_rules(self) -> list[AnalyticsRuleDTO]:
-        specs = [
-            ("Excessive Failed Logins", ["T1110"], True, False, 12.0),
-            ("Impossible Travel", ["T1078"], True, False, 3.0),
-            ("Malware Beacon Detected", ["T1071"], True, False, 0.4),
-            ("Cleartext Protocol Usage", ["T1040"], True, True, 88.0),  # noisy
-            ("Dormant Account Reactivated", ["T1078.002"], False, False, 0.0),  # disabled/stale
-            ("Data Exfil Over DNS", ["T1048.003"], True, False, 0.0),  # never fires
+        """Rules shaped to exercise every rule-health classification.
+
+        Each spec targets one branch of the health evaluator, so a developer
+        running against the mock sees a populated rule-health page rather than a
+        wall of HEALTHY: one noisy, one never-fired, one disabled, one whose
+        required telemetry is the deliberately-silent Windows source, and one
+        too new to judge.
+        """
+        # name, mitre, enabled, capacity, days-since-fired (None = never),
+        # required log-source type, age in days
+        specs: list[tuple[str, list[str], bool, float, int | None, int | None, int]] = [
+            ("Excessive Failed Logins", ["T1110"], True, 12.0, 0, 13, 400),
+            ("Impossible Travel", ["T1078"], True, 3.0, 1, 145, 300),
+            ("Malware Beacon Detected", ["T1071"], True, 0.4, 2, 95, 250),
+            ("Cleartext Protocol Usage", ["T1040"], True, 880.0, 0, 12, 200),
+            ("Dormant Account Reactivated", ["T1078.002"], False, 0.0, 30, 13, 180),
+            ("Data Exfil Over DNS", ["T1048.003"], True, 0.0, None, 95, 150),
+            # Depends on the silent dc02 Windows source -> DEPENDENCY_DEGRADED.
+            ("Admin Group Membership Change", ["T1098"], True, 1.0, 45, 13, 120),
+            # Created two days ago -> INSUFFICIENT_DATA, must not read INACTIVE.
+            ("New Detection Under Test", ["T1059"], True, 0.0, None, 2, 2),
         ]
         out: list[AnalyticsRuleDTO] = []
-        for idx, (name, mitre, enabled, _noisy, cap) in enumerate(specs, start=1):
+        for idx, (name, mitre, enabled, cap, fired_days, ls_type, age_days) in enumerate(
+            specs, start=1
+        ):
+            last_fired = (
+                self._now - timedelta(days=fired_days) if fired_days is not None else None
+            )
             out.append(
                 AnalyticsRuleDTO(
                     qradar_id=5000 + idx,
                     name=name,
+                    description=f"Mock analytics rule for {', '.join(mitre)}",
                     rule_type="EVENT",
                     enabled=enabled,
                     origin="USER",
@@ -232,25 +252,86 @@ class MockQRadarProvider(QRadarProvider):
                     owner="soc-team",
                     average_capacity=cap,
                     categories=["Authentication"] if "T1110" in mitre else [],
-                    mitre_techniques=mitre,
+                    # QRadar exposes no MITRE mapping; the SOC owns it. The mock
+                    # matches that contract and returns none here.
+                    mitre_techniques=[],
+                    created_at=self._now - timedelta(days=age_days),
                     modified_at=self._now - timedelta(days=idx * 3),
+                    generates_offense=cap > 0,
+                    response_actions=["CREATE_OFFENSE"] if cap > 0 else [],
+                    building_block_ids=[6000 + (idx % 3)],
+                    log_source_type_ids=[ls_type] if ls_type else [],
+                    last_triggered_at=last_fired,
+                    event_contribution_count=int(cap * 24),
+                    offense_contribution_count=int(cap // 4),
                 )
             )
         return out
 
-    # -- offenses -----------------------------------------------------------
-    async def list_offenses(self, *, open_only: bool = True) -> list[OffenseDTO]:
-        out: list[OffenseDTO] = []
+    async def list_building_blocks(self) -> list[AnalyticsRuleDTO]:
         specs = [
+            (6000, "BB:CategoryDefinition: Authentication Failures", True),
+            (6001, "BB:HostDefinition: Domain Controllers", True),
+            (6002, "BB:NetworkDefinition: Untrusted Networks", False),  # disabled BB
+        ]
+        return [
+            AnalyticsRuleDTO(
+                qradar_id=bb_id,
+                name=name,
+                description="Mock building block",
+                rule_type="BUILDINGBLOCK",
+                enabled=enabled,
+                origin="SYSTEM",
+                is_building_block=True,
+                owner="soc-team",
+                created_at=self._now - timedelta(days=500),
+            )
+            for bb_id, name, enabled in specs
+        ]
+
+    async def get_rule(self, qradar_id: int) -> AnalyticsRuleDTO | None:
+        for rule in await self.list_rules():
+            if rule.qradar_id == qradar_id:
+                return rule
+        for bb in await self.list_building_blocks():
+            if bb.qradar_id == qradar_id:
+                return bb
+        return None
+
+    # -- offenses -----------------------------------------------------------
+    async def list_offenses(
+        self,
+        *,
+        open_only: bool = True,
+        updated_since: datetime | None = None,
+        max_pages: int | None = None,
+    ) -> list[OffenseDTO]:
+        """A spread of ages, magnitudes and assignment states.
+
+        Deliberately includes an unassigned 30-day-old critical offense so the
+        SLA and aging views have something to show, and a closed one so the
+        history and closing-reason paths are exercised.
+        """
+        # description, status, magnitude, assignee, age minutes
+        specs: list[tuple[str, str, int, str | None, int]] = [
             ("Multiple Failed Logins then Success", "OPEN", 8, None, 240),
             ("Malware Beacon to Known C2", "OPEN", 9, "analyst.jones", 30),
             ("Suspicious Admin Group Change", "OPEN", 6, None, 1440),
+            ("Data Transfer to Untrusted Host", "OPEN", 10, None, 43200),
+            ("Privilege Escalation Attempt", "OPEN", 7, "analyst.lee", 720),
             ("Port Scan from Internal Host", "CLOSED", 4, "analyst.lee", 60),
         ]
+        out: list[OffenseDTO] = []
         for idx, (desc, status, mag, assignee, age_min) in enumerate(specs, start=1):
             if open_only and status != "OPEN":
                 continue
             start = self._now - timedelta(minutes=age_min)
+            # Deterministic per-offense update time so repeat collections with
+            # an unchanged offense produce an unchanged content hash.
+            updated = self._now - timedelta(minutes=idx * 3)
+            if updated_since is not None and updated <= updated_since:
+                continue
+            closed = status == "CLOSED"
             out.append(
                 OffenseDTO(
                     qradar_id=9000 + idx,
@@ -258,23 +339,48 @@ class MockQRadarProvider(QRadarProvider):
                     status=status,
                     magnitude=mag,
                     severity=mag,
-                    credibility=self._rng.randint(4, 9),
-                    relevance=self._rng.randint(3, 8),
+                    credibility=4 + (idx % 6),
+                    relevance=3 + (idx % 6),
                     assigned_to=assignee,
                     offense_type=3,
+                    offense_type_name="Source IP",
                     offense_source="10.20.30." + str(40 + idx),
-                    event_count=self._rng.randint(50, 5000),
-                    flow_count=self._rng.randint(0, 500),
-                    device_count=self._rng.randint(1, 6),
+                    source_network="internal.corporate",
+                    event_count=50 * idx + 17,
+                    flow_count=10 * idx,
+                    device_count=1 + (idx % 6),
+                    source_count=1 + (idx % 4),
+                    destination_count=1 + (idx % 3),
                     start_time=start,
-                    last_updated_time=self._now - timedelta(minutes=self._rng.randint(0, 20)),
+                    last_updated_time=updated,
+                    close_time=updated if closed else None,
+                    closing_reason_id=1 if closed else None,
+                    closing_reason="False Positive, Tuned" if closed else None,
                     categories=["Authentication", "Suspicious Activity"],
                     source_addresses=["203.0.113." + str(idx)],
                     local_destination_addresses=["10.20.30." + str(40 + idx)],
+                    usernames=[f"user{idx:02d}", "svc-backup"],
+                    log_source_ids=[1001 + (idx % 9)],
                     rule_ids=[5000 + idx],
                 )
             )
         return out
+
+    async def get_offense(self, qradar_id: int) -> OffenseDTO | None:
+        for offense in await self.list_offenses(open_only=False):
+            if offense.qradar_id == qradar_id:
+                return offense
+        return None
+
+    async def list_offense_types(self) -> dict[int, str]:
+        return {1: "Source IP", 2: "Destination IP", 3: "Source IP", 4: "Username"}
+
+    async def list_offense_closing_reasons(self) -> dict[int, str]:
+        return {
+            1: "False Positive, Tuned",
+            2: "Non-Issue",
+            3: "Policy Violation",
+        }
 
     # -- Ariel lifecycle ----------------------------------------------------
     async def create_ariel_search(self, aql: str) -> ArielSearchHandleDTO:
