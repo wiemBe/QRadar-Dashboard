@@ -55,6 +55,7 @@ from app.providers.normalize import (
     parse_qradar_time,
 )
 from app.providers.telemetry import EndpointCategory, ErrorClass, observe
+from app.providers.tls import build_ssl_context
 from app.services.backoff import backoff_delay
 
 logger = logging.getLogger("app.providers.qradar_rest")
@@ -116,6 +117,7 @@ class QRadarRestProvider(QRadarProvider):
         api_version: str = "20.0",
         verify_ssl: bool = True,
         ca_bundle: str | None = None,
+        tls_allow_missing_aki: bool = False,
         timeout: float = 60.0,
         connect_timeout: float = 10.0,
         max_retries: int = 3,
@@ -148,8 +150,11 @@ class QRadarRestProvider(QRadarProvider):
             return
 
         # `ca_bundle` points at an internal CA so a private PKI is trusted
-        # without ever disabling verification.
-        verify: ssl.SSLContext | str | bool = ca_bundle if ca_bundle else True
+        # without ever disabling verification. Built as an explicit SSLContext
+        # rather than passed as a path string, which httpx deprecates.
+        verify: ssl.SSLContext = build_ssl_context(
+            ca_bundle, allow_missing_aki=tls_allow_missing_aki
+        )
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/") + "/api",
             headers={

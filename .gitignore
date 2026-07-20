@@ -3,6 +3,11 @@
 deploy/mcp/config.json
 *.pem
 *.key
+# Local secret material (QRadar service token, pinned CA). The whole directory
+# is ignored rather than individual names, so a new secret dropped in here is
+# safe by default instead of safe only if someone remembers to add a rule.
+.secrets/
+*.sec
 
 # Python
 __pycache__/

@@ -8,9 +8,17 @@ from __future__ import annotations
 
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +40,11 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # Fields carrying a validation_alias (qradar_host accepts both
+        # QRADAR_BASE_URL and QRADAR_HOST) must stay constructible by their
+        # own name too, or Settings(qradar_host=...) silently falls back to
+        # the default instead of validating what the caller passed.
+        populate_by_name=True,
     )
 
     # --- core ---------------------------------------------------------------
@@ -59,11 +72,24 @@ class Settings(BaseSettings):
     qradar_provider: ProviderKind = ProviderKind.MOCK
 
     # --- QRadar REST --------------------------------------------------------
-    qradar_host: str = ""
+    # QRADAR_BASE_URL is the preferred name; QRADAR_HOST is accepted for
+    # compatibility with existing deployments.
+    qradar_host: str = Field(
+        default="", validation_alias=AliasChoices("QRADAR_BASE_URL", "QRADAR_HOST")
+    )
     qradar_sec_token: SecretStr = SecretStr("")
+    #: Path to a file holding the SEC token. Preferred over QRADAR_SEC_TOKEN:
+    #: an env var is readable from /proc, leaks into `docker inspect` and into
+    #: any crash reporter that dumps the environment. A file can be mounted
+    #: read-only and mode-restricted. When both are set, the file wins.
+    qradar_api_token_file: str | None = None
     qradar_api_version: str = "20.0"
     qradar_verify_ssl: bool = True
     qradar_ca_bundle: str | None = None
+    #: Tolerate an appliance certificate with no Authority Key Identifier.
+    #: Relaxes an RFC 5280 labelling assertion only — chain, expiry and
+    #: hostname verification stay on. See app/providers/tls.py.
+    qradar_tls_allow_missing_aki: bool = False
 
     # --- Ariel guardrails ---------------------------------------------------
     ariel_max_concurrent_searches: int = Field(default=3, ge=1, le=20)
@@ -258,6 +284,34 @@ class Settings(BaseSettings):
             "offense_snapshot": self.retention_offense_snapshot_days,
         }
 
+    # ------------------------------------------------------------- secrets
+    def resolve_qradar_token(self) -> SecretStr:
+        """Return the SEC token, preferring the file over the environment.
+
+        Read on demand rather than cached at startup so rotating the mounted
+        file takes effect on the next provider build without a restart. Errors
+        name the path but never the contents.
+        """
+        if self.qradar_api_token_file:
+            path = Path(self.qradar_api_token_file)
+            try:
+                # .strip() because an editor-authored token file almost always
+                # ends in a newline, and a trailing \n in a SEC header is a 401
+                # that looks exactly like a wrong token.
+                token = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(
+                    f"QRADAR_API_TOKEN_FILE could not be read: {path} ({exc.strerror})"
+                ) from None
+            if not token:
+                raise ValueError(f"QRADAR_API_TOKEN_FILE is empty: {path}")
+            return SecretStr(token)
+        return self.qradar_sec_token
+
+    @property
+    def has_qradar_token(self) -> bool:
+        return bool(self.qradar_api_token_file or self.qradar_sec_token.get_secret_value())
+
     # ----------------------------------------------------------- validation
     @field_validator("qradar_host")
     @classmethod
@@ -299,10 +353,10 @@ class Settings(BaseSettings):
             problems.append("ENCRYPTION_KEY is required to encrypt stored credentials")
         if self.qradar_provider is ProviderKind.MOCK:
             problems.append("QRADAR_PROVIDER=mock is not permitted in production")
-        if self.qradar_provider is ProviderKind.REST and not (
-            self.qradar_sec_token.get_secret_value()
-        ):
-            problems.append("QRADAR_SEC_TOKEN is required when QRADAR_PROVIDER=rest")
+        if self.qradar_provider is ProviderKind.REST and not self.has_qradar_token:
+            problems.append(
+                "QRADAR_API_TOKEN_FILE or QRADAR_SEC_TOKEN is required when QRADAR_PROVIDER=rest"
+            )
         if self.llm_allow_autonomous_actions:
             problems.append(
                 "LLM_ALLOW_AUTONOMOUS_ACTIONS must be false; autonomous response is not implemented"
