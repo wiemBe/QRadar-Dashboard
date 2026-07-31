@@ -169,7 +169,14 @@ services:
       - --loglevel=INFO
       - --schedule=/tmp/celerybeat-schedule
     healthcheck:
-      disable: true
+      # PersistentScheduler creates this file after it has loaded the Beat
+      # schedule. Its presence proves the process reached scheduler startup;
+      # Docker also marks the service unhealthy if PID 1 exits.
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat-schedule"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ---------------------------------------------------------------- frontend
   frontend:

@@ -156,10 +156,20 @@ class Settings(BaseSettings):
     offense_sla_hours: int = Field(default=24, ge=1)
     # Magnitude at or above which an offense counts as critical.
     offense_critical_magnitude: int = Field(default=7, ge=1, le=10)
+    # A collection older than this is surfaced as a deduplicated operational
+    # alert. Keep the check cadence separate from the threshold.
+    offense_stale_after_seconds: int = Field(default=900, ge=60)
+    offense_stale_check_interval_seconds: int = Field(default=300, ge=60)
+    offense_aggregate_interval_seconds: int = Field(default=300, ge=60)
 
     # --- Rule inventory + health (Phase 3) ----------------------------------
     rule_collection_interval_seconds: int = Field(default=3600, ge=60)
     rule_max_pages: int = Field(default=20, ge=1, le=500)
+    # Offense contribution is the only defensible rule-firing evidence exposed
+    # by the lab appliance. Collection is bounded by both age and row count.
+    rule_metric_collection_interval_seconds: int = Field(default=3600, ge=60)
+    rule_metric_lookback_days: int = Field(default=30, ge=1, le=365)
+    rule_metric_max_offenses: int = Field(default=10_000, ge=1, le=1_000_000)
     # Evaluation window for "has this rule fired recently".
     rule_health_window_days: int = Field(default=30, ge=1, le=365)
     # A rule newer than this is INSUFFICIENT_DATA, never INACTIVE: a detection

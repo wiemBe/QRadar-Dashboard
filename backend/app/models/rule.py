@@ -218,6 +218,15 @@ class RuleMetric(Base):
     # case system; NULL when unknown.
     false_positive_ratio: Mapped[float | None] = mapped_column(Float)
 
+    # Provenance is part of the metric, not an implementation detail.  An
+    # offense contribution proves at least one firing, but it cannot prove the
+    # total firing count or a verified zero for rules that create no offense.
+    provenance: Mapped[str] = mapped_column(String(64), default="unknown", nullable=False)
+    completeness: Mapped[str] = mapped_column(
+        String(32), default="incomplete", nullable=False
+    )
+    inferred: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
     rule: Mapped[AnalyticsRule] = relationship(back_populates="metrics")
 
 

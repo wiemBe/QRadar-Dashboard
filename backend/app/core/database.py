@@ -40,6 +40,23 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return _sessionmaker
 
 
+async def dispose_engine() -> None:
+    """Dispose and forget the process-local async connection pool.
+
+    Celery's synchronous task shims create one event loop per task with
+    ``asyncio.run``. asyncpg connections are bound to the loop that created
+    them, so retaining a pooled connection for the next task produces
+    ``Future attached to a different loop``. Workers call this before their
+    loop closes; FastAPI keeps its long-lived pool unchanged.
+    """
+    global _engine, _sessionmaker
+    engine = _engine
+    _engine = None
+    _sessionmaker = None
+    if engine is not None:
+        await engine.dispose()
+
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency yielding a session that commits on success and rolls
     back on any exception."""
