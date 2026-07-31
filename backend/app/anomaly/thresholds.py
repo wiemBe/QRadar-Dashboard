@@ -65,14 +65,22 @@ class ThresholdResolver:
         custom: dict | None = None,
         anomaly_type: AnomalyType | None = None,
     ) -> Thresholds:
+        # LAB_MODE deliberately uses the explicit 1/2 demo hysteresis for all
+        # criticalities. Production retains the established criticality matrix.
+        if self.settings.lab_mode:
+            open_after = self.settings.anomaly_open_after_intervals
+            resolve_after = self.settings.anomaly_resolve_after_intervals
+        else:
+            open_after = _CRITICALITY_OPEN_AFTER.get(
+                criticality, self.settings.anomaly_open_after_intervals
+            )
+            resolve_after = _CRITICALITY_RESOLVE_AFTER.get(
+                criticality, self.settings.anomaly_resolve_after_intervals
+            )
         base = Thresholds(
             deviation_z=self.settings.anomaly_deviation_threshold,
-            open_after=_CRITICALITY_OPEN_AFTER.get(
-                criticality, self.settings.anomaly_open_after_intervals
-            ),
-            resolve_after=_CRITICALITY_RESOLVE_AFTER.get(
-                criticality, self.settings.anomaly_resolve_after_intervals
-            ),
+            open_after=open_after,
+            resolve_after=resolve_after,
         )
         merged = base
         if custom:

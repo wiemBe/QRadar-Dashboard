@@ -786,3 +786,20 @@ with 36 seen, 0 created, and no error.
 | frontend lint/typecheck/test | clean; 64 tests passed |
 | frontend production build | succeeded on Next.js 15.5.22 |
 | production npm audit | 2 moderate, 3 high, 0 critical; documented, no forced breaking fix |
+
+---
+
+## 14. Phase 3.5 synthetic telemetry workstream
+
+Phase 3 remains frozen. Phase 3.5 adds only an isolated lab-validation layer:
+
+- `tools/qradar_lab_loggen.py` is a deterministic, bounded, rate-protected manual syslog tool.
+- The repository-root `lloggen.py` remains as a compatibility entrypoint.
+- `LAB_MODE` is disabled by default, rejected in production, and shortens only metric/offense
+  observation cadence, baseline sample count, and anomaly hysteresis for demonstrations.
+- Loopback transport tests never send to QRadar. Live sends are explicit operator commands only.
+- QRadar log sources and lab rules remain manual UI configuration; no write API was added.
+
+Operating instructions and exact lab values are in
+[LAB-SYNTHETIC-TELEMETRY.md](LAB-SYNTHETIC-TELEMETRY.md). Sanitized live evidence is maintained in
+[LAB-DEMO-RESULTS.md](LAB-DEMO-RESULTS.md).
