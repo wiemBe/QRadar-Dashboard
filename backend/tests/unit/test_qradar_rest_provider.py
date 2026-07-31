@@ -46,6 +46,62 @@ class RecordingSleep:
         self.delays.append(seconds)
 
 
+class TestLogSourceMetrics:
+    @pytest.mark.asyncio
+    async def test_uses_bounded_read_only_ariel_aggregate(self) -> None:
+        captured_query = ""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal captured_query
+            if request.method == "POST" and request.url.path.endswith("/ariel/searches"):
+                captured_query = request.url.params["query_expression"]
+                return httpx.Response(201, json={"search_id": "metric-1", "status": "WAIT"})
+            if request.url.path.endswith("/ariel/searches/metric-1/results"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "events": [
+                            {
+                                "qradar_id": "7",
+                                "event_count": "300",
+                                "last_event_time": 1_785_506_699_000,
+                            }
+                        ]
+                    },
+                )
+            if request.url.path.endswith("/ariel/searches/metric-1"):
+                return httpx.Response(200, json={"status": "COMPLETED", "progress": 100})
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        provider, _ = build_provider(handler, page_size=10, max_pages=2)
+        start = datetime(2026, 7, 31, 10, 0, tzinfo=UTC)
+        end = datetime(2026, 7, 31, 10, 5, tzinfo=UTC)
+
+        (sample,) = await provider.get_log_source_metrics(start, end)
+
+        assert "FROM events" in captured_query
+        assert "GROUP BY logsourceid" in captured_query
+        assert str(int(start.timestamp() * 1000)) in captured_query
+        assert str(int(end.timestamp() * 1000)) in captured_query
+        assert sample.qradar_id == 7
+        assert sample.event_count == 300
+        assert sample.average_eps == pytest.approx(1.0)
+        assert sample.bucket_seconds == 300
+        assert sample.stored_event_count == 300
+
+    @pytest.mark.asyncio
+    async def test_rejects_unbounded_metric_window_before_io(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        provider, _ = build_provider(handler)
+        start = datetime(2026, 7, 1, tzinfo=UTC)
+        end = datetime(2026, 7, 31, tzinfo=UTC)
+
+        with pytest.raises(ValueError, match="168-hour"):
+            await provider.get_log_source_metrics(start, end)
+
+
 def build_provider(
     handler,
     *,

@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,3 +49,7 @@ class CollectionWatermark(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     intervals_collected: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(String(512))
+    # Collector-specific, non-secret evidence about how a watermark was
+    # produced.  Rule metrics use this to distinguish a complete observation
+    # window from the deliberately incomplete offense-contribution feed.
+    collection_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

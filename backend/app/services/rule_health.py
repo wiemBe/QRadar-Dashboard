@@ -138,19 +138,22 @@ class RuleHealthEvaluator:
         deps = await self._dependencies([r.id for r in rules])
         bb_state = await self._building_block_state(instance.id)
         ls_health = await self._log_source_type_health(instance.id, now)
-        observation_complete = await self._observation_complete(instance.id, window_start)
+        observation_status = await self._observation_status(instance.id, window_start)
+        observation_complete = observation_status == "complete"
 
         for rule in rules:
             verdict = self.classify(
                 rule,
                 now=now,
                 window_start=window_start,
-                trigger_count=firing.get(rule.id, (0, 0))[0],
-                offense_count=firing.get(rule.id, (0, 0))[1],
+                trigger_count=firing.get(rule.id, (0, 0, False))[0],
+                offense_count=firing.get(rule.id, (0, 0, False))[1],
+                metric_inferred=firing.get(rule.id, (0, 0, False))[2],
                 dependencies=deps.get(rule.id, []),
                 building_block_enabled=bb_state,
                 log_source_type_healthy=ls_health,
                 observation_complete=observation_complete,
+                observation_status=observation_status,
             )
             report.evaluated += 1
             report.by_status[verdict.status] = report.by_status.get(verdict.status, 0) + 1
@@ -179,6 +182,8 @@ class RuleHealthEvaluator:
         building_block_enabled: dict[str, bool],
         log_source_type_healthy: dict[str, bool],
         observation_complete: bool = False,
+        observation_status: str = "never_run",
+        metric_inferred: bool = False,
     ) -> HealthVerdict:
         """Classify one rule.
 
@@ -314,6 +319,7 @@ class RuleHealthEvaluator:
                     evidence={
                         "age_days": round(age_days, 2),
                         "observation_complete": False,
+                        "observation_status": observation_status,
                     },
                 )
             return verdict(
@@ -324,7 +330,11 @@ class RuleHealthEvaluator:
                 ),
                 building_blocks_healthy=bb_ok,
                 required_log_sources_healthy=ls_ok,
-                evidence={"age_days": round(age_days, 2), "observation_complete": True},
+                evidence={
+                    "age_days": round(age_days, 2),
+                    "observation_complete": True,
+                    "observation_status": observation_status,
+                },
             )
 
         if rule.last_fired_at is not None:
@@ -346,11 +356,22 @@ class RuleHealthEvaluator:
         return verdict(
             RuleHealthStatus.HEALTHY,
             (
-                f"The rule fired {trigger_count} times in the evaluation window "
-                f"with healthy dependencies."
+                (
+                    f"At least {trigger_count} offense-contributing firings were "
+                    "observed in the evaluation window with healthy dependencies."
+                )
+                if metric_inferred
+                else (
+                    f"The rule fired {trigger_count} times in the evaluation window "
+                    f"with healthy dependencies."
+                )
             ),
             building_blocks_healthy=bb_ok,
             required_log_sources_healthy=ls_ok,
+            evidence={
+                "metric_kind": "inferred" if metric_inferred else "direct",
+                "observation_status": observation_status,
+            },
         )
 
     # ------------------------------------------------------------- helpers
@@ -406,8 +427,8 @@ class RuleHealthEvaluator:
 
     async def _firing_counts(
         self, rule_ids: list[uuid.UUID], window_start: datetime
-    ) -> dict[uuid.UUID, tuple[int, int]]:
-        """(trigger_count, offense_contribution_count) per rule over the window."""
+    ) -> dict[uuid.UUID, tuple[int, int, bool]]:
+        """Counts plus whether any contributing metric is inferred."""
         if not rule_ids:
             return {}
         rows = await self.session.execute(
@@ -415,6 +436,7 @@ class RuleHealthEvaluator:
                 RuleMetric.rule_id,
                 func.coalesce(func.sum(RuleMetric.fire_count), 0),
                 func.coalesce(func.sum(RuleMetric.offense_contribution_count), 0),
+                func.bool_or(RuleMetric.inferred),
             )
             .where(
                 RuleMetric.rule_id.in_(rule_ids),
@@ -422,17 +444,20 @@ class RuleHealthEvaluator:
             )
             .group_by(RuleMetric.rule_id)
         )
-        return {rid: (int(fires), int(offenses)) for rid, fires, offenses in rows.all()}
+        return {
+            rid: (int(fires), int(offenses), bool(inferred))
+            for rid, fires, offenses, inferred in rows.all()
+        }
 
-    async def _observation_complete(
+    async def _observation_status(
         self, instance_id: uuid.UUID, window_start: datetime
-    ) -> bool:
-        """Has a rule-metric collection actually covered the evaluation window?
+    ) -> str:
+        """Return ``never_run``, ``incomplete`` or ``complete``.
 
-        Only a watermark that advanced *into* the window counts. A collector
-        that has never run, that failed, or whose progress stops before the
-        window begins leaves the window unobserved, and every downstream
-        "zero firings" reading is then unmeasured rather than measured-zero.
+        Offense-contribution collection deliberately records ``incomplete``:
+        positive rows prove a lower bound, but no row can prove a zero.  Older
+        direct collectors that predate metadata are treated as complete to
+        preserve the meaning of their existing watermarks.
         """
         watermark = await self.session.scalar(
             select(CollectionWatermark).where(
@@ -441,10 +466,21 @@ class RuleHealthEvaluator:
             )
         )
         if watermark is None or watermark.intervals_collected <= 0:
-            return False
+            return "never_run"
         if watermark.watermark_at is None:
-            return False
-        return self._aware(watermark.watermark_at) >= window_start
+            return "never_run"
+        metadata = watermark.collection_metadata or {}
+        if metadata.get("completeness", "complete") != "complete":
+            return "incomplete"
+        if self._aware(watermark.watermark_at) < window_start:
+            return "incomplete"
+        return "complete"
+
+    async def _observation_complete(
+        self, instance_id: uuid.UUID, window_start: datetime
+    ) -> bool:
+        """Compatibility helper for callers/tests that only need the gate."""
+        return await self._observation_status(instance_id, window_start) == "complete"
 
     async def _dependencies(
         self, rule_ids: list[uuid.UUID]

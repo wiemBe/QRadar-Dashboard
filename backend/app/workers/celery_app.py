@@ -70,10 +70,24 @@ celery_app.conf.beat_schedule = {
         "task": "collect_offenses",
         "schedule": float(settings.offense_collection_interval_seconds),
     },
+    "detect-stale-offense-collection": {
+        "task": "detect_stale_offense_collection",
+        "schedule": float(settings.offense_stale_check_interval_seconds),
+    },
+    "calculate-offense-aggregates": {
+        "task": "calculate_offense_aggregates",
+        "schedule": float(settings.offense_aggregate_interval_seconds),
+    },
     "sync-rule-inventory": {
         # Also covers building blocks: RuleCollector merges both endpoints.
         "task": "sync_rule_inventory",
         "schedule": float(settings.rule_collection_interval_seconds),
+    },
+    "collect-rule-metrics": {
+        # Inferred lower bounds from stored offense contribution; no QRadar
+        # write and no invented rule-statistics endpoint.
+        "task": "collect_rule_metrics",
+        "schedule": float(settings.rule_metric_collection_interval_seconds),
     },
     "evaluate-rule-health": {
         "task": "evaluate_rule_health",

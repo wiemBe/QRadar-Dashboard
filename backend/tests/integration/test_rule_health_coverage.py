@@ -62,13 +62,16 @@ async def make_rule(
     return rule
 
 
-async def set_metric_watermark(session, instance, *, at: datetime, intervals: int = 1):
+async def set_metric_watermark(
+    session, instance, *, at: datetime, intervals: int = 1, metadata: dict | None = None
+):
     """Record that a rule-metric collection completed up to `at`."""
     wm = CollectionWatermark(
         instance_id=instance.id,
         collector=RULE_METRIC_COLLECTOR,
         watermark_at=at,
         intervals_collected=intervals,
+        collection_metadata=metadata or {},
     )
     session.add(wm)
     await session.flush()
@@ -165,6 +168,27 @@ class TestObservationCompletenessAgainstTheDatabase:
 
         (snap,) = await snapshots_for(db_session, rule)
         assert snap.status == RuleHealthStatus.INSUFFICIENT_DATA
+
+    @pytest.mark.asyncio
+    async def test_incomplete_collection_cannot_verify_zero(self, db_session) -> None:
+        inst = await make_instance(db_session)
+        rule = await make_rule(db_session, inst, age_days=120)
+        await set_metric_watermark(
+            db_session,
+            inst,
+            at=NOW,
+            metadata={
+                "provenance": "offense_contribution",
+                "completeness": "incomplete",
+                "zero_is_verified": False,
+            },
+        )
+
+        await evaluator(db_session).evaluate_instance(inst)
+
+        (snap,) = await snapshots_for(db_session, rule)
+        assert snap.status == RuleHealthStatus.INSUFFICIENT_DATA
+        assert snap.evidence["observation_status"] == "incomplete"
 
     @pytest.mark.asyncio
     async def test_another_collectors_watermark_does_not_count(self, db_session) -> None:

@@ -1,16 +1,17 @@
 # Phase 3 Development Handoff
 
-**Status: VERTICAL SLICE WORKING against a live QRadar 7.6.0 FP1 lab.** Collection,
-scheduling, APIs and the offense/rule/coverage frontend all run end to end on real data.
-Remaining: Compose stack verification, and the analytics depth Phase 3 originally scoped.
+**Status: PHASE 3 VERTICAL SLICE COMPLETE against a live QRadar 7.6.0 FP1 lab.** Collection,
+provenance-aware rule metrics, scheduling, PostgreSQL, APIs, the offense/rule/coverage frontend,
+and the production-style Compose deployment all run end to end on real data with TLS verification
+enabled and QRadar access kept read-only.
 
-> **Read [§11](#11-live-qradar-session) first** if you are picking this up. It records what
-> was proven against a real appliance, and three findings that will cost you a day each if
-> you rediscover them.
+> **Read [§13](#13-final-live-vertical-slice-checkpoint) first** if you are picking this up.
+> Sections 1–12 preserve the incremental history and explain earlier gaps; §13 supersedes their
+> old status/counts with the final verified state.
 
-This session ran out of budget partway through Phase 3. This document records exactly
-what was built, what was verified and how, and what the next session must do. Nothing
-here is aspirational: if a thing is not listed as verified, it was not verified.
+This document records what was built and verified across the Phase 3 workstreams. Earlier sections
+are intentionally retained as development history; their “not started” statements are not current
+unless repeated in §12 or §13.
 
 Read this together with [PHASE2-HANDOFF.md](PHASE2-HANDOFF.md), which remains accurate
 for everything Phase 3 did not touch.
@@ -34,6 +35,10 @@ made, because Phase 3 is not complete. This is committed as WIP so no work is lo
 ---
 
 ## 2. The Next.js security upgrade
+
+> Historical checkpoint: the final workstream subsequently upgraded Next.js to **15.5.22**.
+> Current build and audit evidence is in §7 and §13.4; the 15.5.20 analysis below explains the
+> earlier dependency decision only.
 
 ### Versions
 
@@ -293,21 +298,21 @@ through a lookup table and an unknown value returns 422 rather than silently fal
 | Gate | Result |
 |---|---|
 | `ruff check app tests` | **clean** |
-| `mypy app` | **29 errors in 17 files** — unchanged baseline, **zero new errors** |
-| `pytest -m "not integration"` | **474 passed** |
-| `pytest -m integration` | **211 passed** |
-| `pytest` | **685 passed, 0 skipped, 0 failed** |
-| `alembic upgrade head` + `alembic check` | **no drift** on a freshly created database |
-| Frontend `npm ci` / `lint` / `typecheck` / `test` / `build` | all pass — 22 tests, production build succeeds on Next 15.5.20 |
-| `npm audit --omit=dev` | 4 moderate, 0 high, 0 critical |
+| `mypy app` | **28 existing errors in 16 files** — improved from 29/17, **zero new errors** |
+| `pytest -m "not integration"` | **634 passed, 0 skipped** |
+| `pytest -m integration` | **247 passed, 0 skipped** |
+| `pytest` | **881 passed, 0 skipped, 0 failed** |
+| fresh `alembic upgrade head` + `alembic check` | migrations `0001` → `0003`; **no drift** |
+| Frontend `npm ci` / `lint` / `typecheck` / `test` / `build` | all pass — 64 tests; production build succeeds on Next **15.5.22** |
+| `npm audit --omit=dev` | **2 moderate, 3 high, 0 critical**; only breaking/incorrect forced fixes offered |
+| `docker compose up -d --build` | all six long-running required services healthy; migrate exited 0 |
+| live backend/frontend smoke | health, capabilities, offense/rule/coverage APIs and pages all HTTP 200 |
+| worker/Beat | 13 tasks registered; 13 configurable schedules registered; queued live sync succeeded |
 
-Test totals: **227 → 685** (+458). See §7a for the breakdown.
-
-### Not performed
-
-- `docker compose up -d --build` full-stack health check — **not run**.
-- Compose smoke tests against the live endpoints — **not run**.
-- Celery worker/beat registration — **no Phase 3 tasks exist yet** (§8.1).
+The production audit findings are ECharts (moderate), PostCSS (one moderate and two high
+advisories), and sharp/libvips (high advisories). `npm audit fix --force` proposes breaking or
+incorrect dependency changes, so it was not used. QRadar text remains server-sanitized and no chart
+uses an HTML formatter; dependency upgrades remain a Phase 4 gate.
 
 > **Running the gates.** Run pytest from `backend/`, not the repo root: the migration
 > tests resolve `alembic.ini` relative to the working directory and fail otherwise.
@@ -436,7 +441,11 @@ queries, magnitude trend) is exercised only through the API surface, not directl
 
 ---
 
-## 8. What remains
+## 8. Historical gap list (closed by the final workstreams)
+
+> This section is retained to show the dependency order used during development. Background jobs,
+> database-backed MCP auditing, tests, frontend views, documentation, and full-stack verification
+> described below are now complete; see §13 for their final implementations and evidence.
 
 Ordered by dependency. Items 1–3 are required before Phase 3 can be called complete.
 
@@ -493,6 +502,9 @@ feature commit.
 
 ## 9. Known risks
 
+> Historical risk register. MCP database auditing, live field validation, RuleMetric collection,
+> and Compose verification were completed later. Use §12 for the current remaining risks.
+
 1. **The Next.js dependency may still be exposed.** See §2. This is the single most
    important open item — recheck npm before any deploy.
 2. **Migration 0001 reads live metadata.** Every future migration must be
@@ -528,7 +540,7 @@ feature commit.
 - Upgrade echarts to 6.x and clear the last production audit finding.
 - Automate the pre-deploy dependency gate (§2) in CI.
 - Migrate `next lint` → ESLint CLI (deprecated in 15.5, removed in 16).
-- Resolve the 29 pre-existing mypy errors.
+- Resolve the 28 pre-existing mypy errors.
 - Only then consider the LLM/RAG work — explicitly out of scope for Phase 3, and the
   read-only MCP posture must survive it unchanged.
 
@@ -671,25 +683,106 @@ fetch and self-contend on the advisory lock.
 
 ## 12. Remaining work
 
-Ordered by what unblocks the most.
+Phase 3's required vertical slice is complete. Remaining items are honest data or Phase 4 limits,
+not missing wiring:
 
-1. **Compose stack verification — not done.** The slice was proven with host-side uvicorn
-   and `next start` against a containerised database. `docker compose up -d --build` with
-   all eight services has **not** been run this session. Secrets must be mounted as
-   read-only Docker secrets; SELinux stays enforcing and `:z`/`:Z` remain forbidden
-   (see §4.2).
-2. **Rule metrics from offense contribution.** The only honest firing evidence available
-   on 7.6.0. Derive `RuleMetric` from stored `offense_snapshot.rule_ids`, recording
-   provenance (`offense_contribution`) and completeness — it establishes only rules that
-   produced offenses, within the offense retention window, so it must not be presented as
-   total observation. This is what moves rules off `INSUFFICIENT_DATA`.
-3. **ATT&CK technique mappings.** Coverage reports `NOT_EVALUATED` until they exist.
-   `POST /api/v1/coverage/mappings` accepts them; there is no seed set.
-4. **`RuleCollector.sync` still has no dedicated tests** (§7a) — the largest
-   characterization gap, now also the most exercised code path.
-5. **Rule detail depth.** `/rules/[id]` shows metadata and health evidence; building-block
-   dependencies, telemetry dependencies and health history are not surfaced (and
-   dependencies are empty upstream anyway — §11.2).
-6. **Offense analytics visualisation.** `/offenses/analytics` returns aging buckets and
-   distributions that no page renders yet.
-7. The pre-existing items in §10 still stand.
+1. **ATT&CK technique mappings are empty in this lab.** Coverage correctly reports no evaluated
+   mappings. Operators can add SOC-owned mappings through `POST /api/v1/coverage/mappings`; the
+   application does not invent a seed set.
+2. **QRadar 7.6.0 exposes no complete rule-statistics source.** Offense contributions provide an
+   inferred lower bound only. A silent rule remains `INSUFFICIENT_DATA`; `NEVER_OBSERVED` requires a
+   future complete source that verifies zero observations.
+3. **Rule dependencies are absent upstream.** The live rule payload exposes neither building-block
+   nor log-source-type references, so the dependency UI safely renders empty evidence rather than
+   fabricated relationships.
+4. **Production dependency audit:** ECharts, PostCSS, and sharp/libvips advisories remain because
+   the current npm fixes are breaking or incorrect. Resolve through deliberate compatible upgrades
+   in Phase 4; do not use the proposed forced downgrade.
+5. **Phase 4 only:** freeze migration 0001, retire the 28 existing mypy errors, migrate from
+   `next lint`, and consider LLM/RAG only after those hardening items. The read-only provider and MCP
+   posture must remain unchanged.
+
+---
+
+## 13. Final live vertical-slice checkpoint
+
+### 13.1 Final implementation
+
+- Migration `0003_rule_metric_provenance.py` adds RuleMetric provenance, completeness, and inferred
+  markers plus collector metadata on watermarks.
+- `RuleMetricCollector` uses only stored offense contribution rule IDs, a bounded 30-day/default
+  UTC window, a configured row ceiling, an advisory lock, and idempotent daily upserts. It never
+  writes synthetic zero rows.
+- Rule health distinguishes collection never run, incomplete, inferred, and complete observations.
+  An inferred positive can establish `HEALTHY`; incomplete silence stays `INSUFFICIENT_DATA`.
+- `QRadarRestProvider.get_log_source_metrics` uses one bounded read-only Ariel aggregate query,
+  capped polling, capped result rows, and stores no raw events.
+- Phase 3 worker tasks cover log-source inventory/metrics, offense collection/staleness/aggregates,
+  combined rule/building-block inventory, rule metrics/health, and detection coverage. Every Phase 3
+  pass is per-instance and locked. Configurable Beat entries cover all 13 application jobs.
+- The Celery shim disposes its async SQLAlchemy engine in the same event loop after every task. Six
+  sequential queued rule-metric jobs and a final queued live log-source sync proved safe worker
+  reuse after the fix.
+- MCP calls are persisted through the existing `AuditLog` sink with caller, tool, duration,
+  outcome, and argument key names only. Values and response bodies are never stored.
+- Rule detail renders dependency groups, health reason/evidence, and health history. Coverage now
+  includes technique-, rule-, and data-source-centric views. Offense list/detail/history remain
+  read-only and expose no mutation controls.
+
+### 13.2 Live QRadar evidence
+
+The live preflight used the pinned CA with hostname/IP-SAN and chain verification enabled.
+`GET /api/system/about` returned HTTP 200 for QRadar **7.6.0 FP1**, external version 7.6.0.0,
+build 2026.4.0.20260710212409. `/api/help/versions` offered 43 versions with **29.0** highest.
+Bounded first-page reads returned 36 log sources, 14 offenses, 100 analytics rules, and 100
+building blocks. No token, SEC header, or credential value was printed or logged.
+
+`qradarce2` was registered idempotently with an encrypted token, the pinned CA, API 29.0, and TLS
+verification enabled. `qradar list` and `qradar test` succeeded without exposing the encrypted
+token.
+
+Two final `sync all` runs from the rebuilt image both completed successfully. The second pass
+reported 36 log sources, 14 current offense snapshots, 352 rules including 219 building blocks,
+2 inferred RuleMetric buckets containing 14 contributions for one matched rule, 133 evaluated
+rules (`38 DISABLED`, `94 INSUFFICIENT_DATA`, `1 HEALTHY`), and no ATT&CK mappings. Stale detection
+was healthy; aggregates reported 14 active, 14 unassigned, and 7 exceeding SLA. Natural-key checks:
+
+| Entity | Rows | Distinct natural keys |
+|---|---:|---:|
+| log sources | 36 | 36 |
+| offense snapshots | 14 | 14 |
+| analytics rules | 352 | 352 |
+| building blocks | 219 | 219 |
+| rule metrics | 2 | 2 |
+
+All collector watermarks had a non-null watermark, `consecutive_failures=0`, and null
+`last_error`. Rule-metric watermark metadata records `offense_contribution`, `inferred`, and
+`incomplete`, so absence is never mistaken for a verified zero.
+
+### 13.3 Deployment and operator verification
+
+`docker compose up -d --build` built production-style images that copy source. PostgreSQL, Redis,
+backend, Celery worker, Celery Beat, and frontend were healthy; the migration service exited 0 after
+upgrading through `0003`. SELinux remained enabled, no privileged service or Docker socket was used,
+and no broad relabel mount was added. `qradar-mcp` remained off because its optional profile was not
+needed.
+
+The following returned HTTP 200 from the final images: versioned live/ready health, provider
+capabilities, offense list/aggregates, rule list/health summary, coverage summary, and the offense,
+rule, and coverage frontend routes. Worker inspection showed all 13 tasks. Beat inspection showed
+all 13 configurable schedules. A `sync_log_sources` task sent through Redis completed on the worker
+with 36 seen, 0 created, and no error.
+
+### 13.4 Final quality gates
+
+| Gate | Final result |
+|---|---|
+| Ruff | clean |
+| mypy | 28 existing errors / 16 files; no new errors |
+| unit pytest | 634 passed, 0 skipped |
+| integration pytest | 247 passed, 0 skipped |
+| full pytest | 881 passed, 0 skipped, 0 failed |
+| Alembic fresh upgrade/check | `0001` → `0003`; no drift |
+| frontend lint/typecheck/test | clean; 64 tests passed |
+| frontend production build | succeeded on Next.js 15.5.22 |
+| production npm audit | 2 moderate, 3 high, 0 critical; documented, no forced breaking fix |

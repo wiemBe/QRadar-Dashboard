@@ -44,6 +44,7 @@ from app.providers.dto import (
     ArielSearchStatusDTO,
     InstanceInfoDTO,
     LogSourceDTO,
+    LogSourceMetricSample,
     LogSourceTypeDTO,
     OffenseDTO,
 )
@@ -382,6 +383,81 @@ class QRadarRestProvider(QRadarProvider):
                 continue
             out.append(LogSourceTypeDTO(type_id=type_id, name=name[:255]))
         return out
+
+    async def get_log_source_metrics(
+        self, window_start: datetime, window_end: datetime
+    ) -> list[LogSourceMetricSample]:
+        """Collect bounded per-log-source event volume through Ariel.
+
+        QRadar exposes no REST metric endpoint. This is a read-only aggregate
+        over ``events`` and stores no raw event or payload data. Search creation
+        is attempted once, polling is bounded, and results are capped by the
+        provider's pagination ceiling.
+        """
+        self.require(ProviderCapability.AQL_EXECUTION)
+        start = window_start if window_start.tzinfo else window_start.replace(tzinfo=UTC)
+        end = window_end if window_end.tzinfo else window_end.replace(tzinfo=UTC)
+        start = start.astimezone(UTC)
+        end = end.astimezone(UTC)
+        seconds = int((end - start).total_seconds())
+        if seconds <= 0:
+            raise ValueError("metric window end must be after its start")
+        if seconds > 168 * 3600:
+            raise ValueError("metric window exceeds the 168-hour safety bound")
+
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        aql = (
+            'SELECT logsourceid AS "qradar_id", COUNT(*) AS "event_count", '  # noqa: S608 - integer epochs only
+            'MAX(starttime) AS "last_event_time" FROM events '
+            f"WHERE starttime >= {start_ms} AND starttime < {end_ms} "
+            "GROUP BY logsourceid"
+        )
+        handle = await self.create_ariel_search(aql)
+        status: ArielSearchStatusDTO | None = None
+        # Two minutes maximum. The task's interval is at least one minute, and
+        # a stuck appliance must never pin a worker indefinitely.
+        for _ in range(120):
+            status = await self.get_ariel_search_status(handle.search_id)
+            if status.is_terminal:
+                break
+            await self._sleep(1.0)
+        else:
+            await self.cancel_ariel_search(handle.search_id)
+            raise ProviderUnavailableError("QRadar Ariel metric search timed out")
+
+        if status is None or not status.is_success:
+            raise ProviderError("QRadar Ariel metric search did not complete")
+
+        max_rows = self._page_size * self._max_pages
+        results = await self.get_ariel_search_results(
+            handle.search_id, max_rows=max_rows
+        )
+        samples: list[LogSourceMetricSample] = []
+        for row in results.rows:
+            qradar_id = as_int(row.get("qradar_id"))
+            count = as_int(row.get("event_count"))
+            if qradar_id is None or count is None or count < 0:
+                continue
+            last_event = parse_qradar_time(row.get("last_event_time"))
+            delay = (
+                max(0.0, (end - last_event).total_seconds())
+                if last_event is not None
+                else None
+            )
+            samples.append(
+                LogSourceMetricSample(
+                    qradar_id=qradar_id,
+                    bucket_start=start,
+                    bucket_seconds=seconds,
+                    event_count=count,
+                    average_eps=count / seconds,
+                    last_event_at=last_event,
+                    event_delay_seconds=delay,
+                    stored_event_count=count,
+                )
+            )
+        return samples
 
     # ------------------------------------------------------------- rules
     async def list_rules(self) -> list[AnalyticsRuleDTO]:

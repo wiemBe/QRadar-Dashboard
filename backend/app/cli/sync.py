@@ -19,7 +19,11 @@ import sys
 from collections.abc import Awaitable, Callable
 
 from app.workers.tasks import (
+    calculate_offense_aggregates,
+    collect_metrics,
     collect_offenses,
+    collect_rule_metrics,
+    detect_stale_offense_collection,
     evaluate_detection_coverage,
     evaluate_rule_health,
     sync_log_sources,
@@ -33,8 +37,12 @@ Runner = Callable[[str | None], Awaitable[dict]]
 #: that read that.
 COMMANDS: dict[str, Runner] = {
     "log-sources": sync_log_sources,
+    "log-source-metrics": collect_metrics,
     "offenses": collect_offenses,
+    "stale-offenses": detect_stale_offense_collection,
+    "offense-aggregates": calculate_offense_aggregates,
     "rules": sync_rule_inventory,
+    "rule-metrics": collect_rule_metrics,
     "rule-health": evaluate_rule_health,
     "coverage": evaluate_detection_coverage,
 }

@@ -300,6 +300,48 @@ export interface RuleSummary {
   mitre_techniques: string[];
 }
 
+export interface RuleDependency {
+  kind: string;
+  target_ref: string;
+  target_name: string | null;
+  source: string;
+  confidence: number;
+  provenance: string | null;
+}
+
+export interface RuleDetail extends RuleSummary {
+  description: string | null;
+  categories: string[];
+  average_capacity: number | null;
+  generates_offense: boolean | null;
+  response_actions: string[];
+  qradar_created_at: string | null;
+  qradar_modified_at: string | null;
+  first_seen_at: string | null;
+  soc_notes: string | null;
+  expected_daily_firings: number | null;
+  health_monitoring_enabled: boolean;
+  dependencies: RuleDependency[];
+}
+
+export interface RuleHealthSnapshot {
+  evaluated_at: string;
+  status: string;
+  logic_version: number;
+  confidence: number;
+  reason: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  last_triggered_at: string | null;
+  trigger_count: number;
+  offense_contribution_count: number;
+  enabled: boolean;
+  building_blocks_healthy: boolean | null;
+  required_log_sources_healthy: boolean | null;
+  missing_dependencies: string[];
+  evidence: Record<string, unknown>;
+}
+
 export interface RuleHealthCount {
   status: string;
   count: number;
@@ -322,8 +364,44 @@ export interface TechniqueCoverage {
   coverage_score: number | null;
   confidence: number | null;
   reason: string | null;
-  rule_count: number;
-  evaluated_at: string | null;
+  mapped_rule_count: number;
+  enabled_rule_count: number;
+  firing_rule_count: number;
+  inferred_rule_count: number;
+  degraded_rule_count: number;
+  last_evaluated_at: string | null;
+}
+
+export interface RuleCoverageView {
+  rule_id: string;
+  qradar_id: number;
+  name: string;
+  enabled: boolean;
+  health_status: string;
+  techniques: Array<{
+    technique_id: string;
+    technique_name: string | null;
+    tactic: string | null;
+    source: string;
+    confidence: number;
+    provenance: string | null;
+  }>;
+}
+
+export interface DataSourceCoverageView {
+  kind: string;
+  target_ref: string;
+  target_name: string | null;
+  rules: Array<{
+    rule_id: string;
+    qradar_id: number;
+    name: string;
+    enabled: boolean;
+    health_status: string;
+    dependency_source: string;
+    dependency_confidence: number;
+  }>;
+  techniques: string[];
 }
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
@@ -384,7 +462,9 @@ export const api = {
     health_status?: string;
     enabled?: boolean;
   } = {}) => request<Page<RuleSummary>>(`/rules${qs(params)}`),
-  rule: (id: string) => request<RuleSummary>(`/rules/${id}`),
+  rule: (id: string) => request<RuleDetail>(`/rules/${id}`),
+  ruleHealthHistory: (id: string) =>
+    request<RuleHealthSnapshot[]>(`/rules/${id}/health-history`),
   ruleHealthSummary: () => request<RuleHealthCount[]>("/rules/health-summary"),
 
   coverageSummary: () => request<CoverageSummary>("/coverage/summary"),
@@ -392,6 +472,9 @@ export const api = {
     request<Page<TechniqueCoverage>>(`/coverage/techniques${qs(params)}`),
   coverageDegraded: () => request<Page<TechniqueCoverage>>("/coverage/degraded"),
   coverageMissing: () => request<Page<TechniqueCoverage>>("/coverage/missing"),
+  coverageByRule: () => request<RuleCoverageView[]>("/coverage/by-rule"),
+  coverageByDataSource: () =>
+    request<DataSourceCoverageView[]>("/coverage/by-data-source"),
 
   acknowledgeAlert: (id: string) =>
     request<Alert>(`/alerts/${id}/acknowledge`, { method: "POST" }),

@@ -1,4 +1,8 @@
-import { api, type RuleSummary } from "@/lib/api";
+import {
+  api,
+  type RuleDetail,
+  type RuleHealthSnapshot,
+} from "@/lib/api";
 import Link from "next/link";
 import { formatDateTime, healthMeaning, healthTone, isUnestablished } from "@/lib/health";
 
@@ -9,12 +13,16 @@ export default async function RuleDetailPage({
 }) {
   const { id } = await params;
 
-  let rule: RuleSummary | null = null;
+  let rule: RuleDetail | null = null;
+  let history: RuleHealthSnapshot[] = [];
   let missing = false;
   let error = false;
 
   try {
-    rule = await api.rule(id);
+    [rule, history] = await Promise.all([
+      api.rule(id),
+      api.ruleHealthHistory(id).catch(() => []),
+    ]);
   } catch (e) {
     if (e && typeof e === "object" && "status" in e && e.status === 404) missing = true;
     else error = true;
@@ -37,6 +45,9 @@ export default async function RuleDetailPage({
   }
 
   const r = rule;
+  const latest = history[0] ?? null;
+  const buildingBlocks = r.dependencies.filter((d) => d.kind === "BUILDING_BLOCK");
+  const telemetry = r.dependencies.filter((d) => d.kind !== "BUILDING_BLOCK");
 
   return (
     <>
@@ -75,16 +86,44 @@ export default async function RuleDetailPage({
         <div className="notice">
           <strong>{healthMeaning(r.health_status)}</strong>
           <p>
-            QRadar&rsquo;s <code>/analytics/rules</code> endpoint returns no
-            last-triggered timestamp and exposes no rule-statistics endpoint, so
-            there is no evidence available about whether this rule has fired.
-            This is reported as unestablished rather than as a detection gap —
-            an unobserved rule and a broken rule are not the same finding.
+            {latest?.reason ??
+              "No complete rule-metric observation covers this rule. Missing data is reported as unestablished rather than as a detection gap."}
           </p>
         </div>
       ) : (
-        <p>{healthMeaning(r.health_status)}</p>
+        <p>{latest?.reason ?? healthMeaning(r.health_status)}</p>
       )}
+
+      <div className="detail-grid">
+        <div className="detail-block">
+          <h4>Building blocks ({buildingBlocks.length})</h4>
+          {buildingBlocks.length === 0 ? (
+            <p className="muted">No building-block dependencies were exposed by QRadar.</p>
+          ) : (
+            <ul>
+              {buildingBlocks.map((d) => (
+                <li key={`${d.kind}:${d.target_ref}`}>
+                  {d.target_name ?? d.target_ref} · {d.source.toLowerCase()} · {Math.round(d.confidence * 100)}%
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="detail-block">
+          <h4>Telemetry requirements ({telemetry.length})</h4>
+          {telemetry.length === 0 ? (
+            <p className="muted">No log-source dependencies were exposed by QRadar.</p>
+          ) : (
+            <ul>
+              {telemetry.map((d) => (
+                <li key={`${d.kind}:${d.target_ref}`}>
+                  {d.target_name ?? d.target_ref} · {d.kind.replace(/_/g, " ")} · {d.source.toLowerCase()}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
 
       <h3>Metadata</h3>
       <table>
@@ -137,6 +176,36 @@ export default async function RuleDetailPage({
           </tr>
         </tbody>
       </table>
+
+      <h3>Health history</h3>
+      {history.length === 0 ? (
+        <div className="notice">No rule-health evaluation has been stored yet.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Evaluated</th>
+              <th>Status</th>
+              <th>Confidence</th>
+              <th>Triggers</th>
+              <th>Offenses</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.map((h) => (
+              <tr key={h.evaluated_at}>
+                <td>{formatDateTime(h.evaluated_at)}</td>
+                <td><span className={`pill ${healthTone(h.status)}`}>{h.status.replace(/_/g, " ")}</span></td>
+                <td>{Math.round(h.confidence * 100)}%</td>
+                <td>{h.trigger_count}</td>
+                <td>{h.offense_contribution_count}</td>
+                <td className="muted">{h.reason ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </>
   );
 }
