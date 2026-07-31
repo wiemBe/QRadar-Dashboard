@@ -9,6 +9,11 @@ MITRE ATT&CK detection coverage — and it operates strictly **read-only** again
 > rule-health, and detection-coverage dashboards. Phase 4 remains out of scope. See
 > [Roadmap](#roadmap) and [the Phase 3 handoff](docs/PHASE3-HANDOFF.md).
 
+Phase 3.5 adds an opt-in, manual synthetic-telemetry lab without changing the read-only QRadar
+application contract. See [the lab guide](docs/LAB-SYNTHETIC-TELEMETRY.md) and
+[sanitized demo results](docs/LAB-DEMO-RESULTS.md). The generator is never started by the backend,
+Celery, Beat, Compose, or normal tests.
+
 ---
 
 ## Table of contents
