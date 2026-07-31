@@ -22,7 +22,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
-
 DEFAULT_TARGET = "192.168.122.50"
 DEFAULT_PORT = 514
 DEFAULT_EPS = 1.0
@@ -219,14 +218,18 @@ class EventGenerator:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.options = options
-        self.rng = random.Random(options.seed)
+        # Reproducibility is intentional; this generator never creates secrets.
+        self.rng = random.Random(options.seed)  # noqa: S311
         self.clock = clock or (lambda: datetime.now(UTC))
         self._repeated: Event | None = None
 
     def generate(self, index: int) -> str:
         event = self._event(index)
         if self.options.scenario == "parsing-degradation":
-            body = f"LEEF:2.0|SyntheticLab|Malformed|1.0|PARSE-DEGRADED|devTime={_iso(event.timestamp)}\tbrokenField\tsrc"
+            body = (
+                "LEEF:2.0|SyntheticLab|Malformed|1.0|PARSE-DEGRADED|0x09|"
+                f"devTime={_iso(event.timestamp)}\tbrokenField\tsrc"
+            )
         elif self.options.output_format == "leef":
             body = self._leef(event)
         else:
@@ -267,7 +270,11 @@ class EventGenerator:
         return self._scenario_event(scenario, now, index)
 
     def _identity(self, profile: str) -> tuple[str, str]:
-        devices = ALTERNATE_DEVICES[profile] if self.options.multiple_devices else (DEFAULT_DEVICES[profile],)
+        devices = (
+            ALTERNATE_DEVICES[profile]
+            if self.options.multiple_devices
+            else (DEFAULT_DEVICES[profile],)
+        )
         host, address = self.rng.choice(devices)
         return self.options.fixed_host or host, address
 
@@ -328,8 +335,14 @@ class EventGenerator:
                 )
             )
             return self._base(
-                profile, now, event_id=EVENT_IDS[key], category="intrusion", action="blocked",
-                severity=severity, signature=signature, dst_port=self.rng.choice((22, 80, 443, 445)),
+                profile,
+                now,
+                event_id=EVENT_IDS[key],
+                category="intrusion",
+                action="blocked",
+                severity=severity,
+                signature=signature,
+                dst_port=self.rng.choice((22, 80, 443, 445)),
             )
         if profile == "waf":
             key, signature, request = self.rng.choice(
@@ -340,34 +353,56 @@ class EventGenerator:
                 )
             )
             event = self._base(
-                profile, now, event_id=EVENT_IDS[key], category="web-attack", action="blocked",
-                severity=9, signature=signature, dst_port=443,
+                profile,
+                now,
+                event_id=EVENT_IDS[key],
+                category="web-attack",
+                action="blocked",
+                severity=9,
+                signature=signature,
+                dst_port=443,
             )
             return replace(event, request_method="GET", request=request, status_code=403)
         if profile == "linux_firewall":
             event = self._base(
-                profile, now, event_id=EVENT_IDS["linux_firewall"], category="firewall",
-                action=self.rng.choice(("blocked", "blocked", "allowed")), severity=6,
-                signature="Linux firewall decision", dst_port=self.rng.choice((22, 80, 443, 445, 5432)),
+                profile,
+                now,
+                event_id=EVENT_IDS["linux_firewall"],
+                category="firewall",
+                action=self.rng.choice(("blocked", "blocked", "allowed")),
+                severity=6,
+                signature="Linux firewall decision",
+                dst_port=self.rng.choice((22, 80, 443, 445, 5432)),
             )
             return replace(event, vendor_message=self._linux_firewall_vendor(event))
         if profile == "windows_firewall":
             denied = self.rng.choice((False, False, True))
             event_id = EVENT_IDS["windows_firewall_deny" if denied else "windows_firewall_allow"]
             event = self._base(
-                profile, now, event_id=event_id, category="firewall",
-                action="blocked" if denied else "allowed", severity=6 if denied else 3,
+                profile,
+                now,
+                event_id=event_id,
+                category="firewall",
+                action="blocked" if denied else "allowed",
+                severity=6 if denied else 3,
                 signature="Windows Filtering Platform connection",
                 dst_port=self.rng.choice((53, 80, 443, 445, 3389)),
             )
-            return replace(event, vendor_message=self._windows_vendor(event, int(event_id.split("-")[1])))
+            return replace(
+                event, vendor_message=self._windows_vendor(event, int(event_id.split("-")[1]))
+            )
         if profile == "linux_auth":
             kind = self.rng.choice(tuple(k for k in EVENT_IDS if k.isupper()))
             action = "failure" if kind == "SSH_LOGIN_FAILED" else "success"
             event = self._base(
-                profile, now, event_id=EVENT_IDS[kind], category="authentication",
-                action=action, severity=7 if "FAILED" in kind or "CLEARED" in kind else 4,
-                signature=kind.replace("_", " ").title(), dst_port=22,
+                profile,
+                now,
+                event_id=EVENT_IDS[kind],
+                category="authentication",
+                action=action,
+                severity=7 if "FAILED" in kind or "CLEARED" in kind else 4,
+                signature=kind.replace("_", " ").title(),
+                dst_port=22,
             )
             return replace(event, vendor_message=self._linux_auth_vendor(event, kind))
         if profile == "windows_auth":
@@ -380,21 +415,42 @@ class EventGenerator:
             return self._windows_event(profile, now, win_event_id)
         if profile == "dns":
             event = self._base(
-                profile, now, event_id=EVENT_IDS["dns"], category="dns", action="resolved",
-                severity=3, signature="Synthetic DNS query", dst_port=53, proto="UDP",
+                profile,
+                now,
+                event_id=EVENT_IDS["dns"],
+                category="dns",
+                action="resolved",
+                severity=3,
+                signature="Synthetic DNS query",
+                dst_port=53,
+                proto="UDP",
             )
             return replace(event, request="lab.example.test", status_code=0)
         event = self._base(
-            "proxy", now, event_id=EVENT_IDS["proxy"], category="web-proxy", action="allowed",
-            severity=3, signature="Synthetic proxy request", dst_port=443,
+            "proxy",
+            now,
+            event_id=EVENT_IDS["proxy"],
+            category="web-proxy",
+            action="allowed",
+            severity=3,
+            signature="Synthetic proxy request",
+            dst_port=443,
         )
-        return replace(event, request_method="GET", request="https://portal.example.test/lab", status_code=200)
+        return replace(
+            event, request_method="GET", request="https://portal.example.test/lab", status_code=200
+        )
 
     def _windows_event(self, profile: str, now: datetime, event_id: int) -> Event:
         signature, action, severity = WINDOWS_EVENTS[event_id]
         event = self._base(
-            profile, now, event_id=f"WIN-{event_id}", category="windows-security", action=action,
-            severity=severity, signature=signature, dst_port=445,
+            profile,
+            now,
+            event_id=f"WIN-{event_id}",
+            category="windows-security",
+            action=action,
+            severity=severity,
+            signature=signature,
+            dst_port=445,
         )
         return replace(event, vendor_message=self._windows_vendor(event, event_id))
 
@@ -407,44 +463,82 @@ class EventGenerator:
             username = self.options.fixed_username or SYNTHETIC_USERS[index % len(SYNTHETIC_USERS)]
             return self._auth_scenario(now, 4625, stable_src, username)
         if scenario == "failed-login-then-success":
-            event_id = 4624 if index % (self.options.attempt_count + 1) == self.options.attempt_count else 4625
+            event_id = (
+                4624
+                if index % (self.options.attempt_count + 1) == self.options.attempt_count
+                else 4625
+            )
             return self._auth_scenario(now, event_id, stable_src, stable_user)
         if scenario == "privileged-group-add":
-            return self._auth_scenario(now, 4728, stable_src, stable_user, profile="windows_account")
+            return self._auth_scenario(
+                now, 4728, stable_src, stable_user, profile="windows_account"
+            )
         if scenario == "account-created":
-            return self._auth_scenario(now, 4720, stable_src, stable_user, profile="windows_account")
+            return self._auth_scenario(
+                now, 4720, stable_src, stable_user, profile="windows_account"
+            )
         if scenario == "suspicious-powershell":
-            event = self._auth_scenario(now, 4688, stable_src, stable_user, profile="windows_account")
+            event = self._auth_scenario(
+                now, 4688, stable_src, stable_user, profile="windows_account"
+            )
             return replace(event, request="powershell.exe -NoProfile -EncodedCommand LABONLY")
         if scenario == "port-scan":
             event = self._base(
-                "linux_firewall", now, event_id=EVENT_IDS["linux_firewall"], category="port-scan",
-                action="blocked", severity=8, signature="Synthetic sequential port scan",
-                src=stable_src, dst_port=PORT_SCAN_PORTS[index % len(PORT_SCAN_PORTS)],
+                "linux_firewall",
+                now,
+                event_id=EVENT_IDS["linux_firewall"],
+                category="port-scan",
+                action="blocked",
+                severity=8,
+                signature="Synthetic sequential port scan",
+                src=stable_src,
+                dst_port=PORT_SCAN_PORTS[index % len(PORT_SCAN_PORTS)],
                 username=stable_user,
             )
             return replace(event, vendor_message=self._linux_firewall_vendor(event))
         if scenario == "ips-exploit-burst":
             return self._base(
-                "ips", now, event_id=EVENT_IDS["ips_exploit"], category="intrusion",
-                action="blocked", severity=9, signature="ET EXPLOIT Apache Struts Attempt",
-                src=stable_src, dst_port=443, username=stable_user,
+                "ips",
+                now,
+                event_id=EVENT_IDS["ips_exploit"],
+                category="intrusion",
+                action="blocked",
+                severity=9,
+                signature="ET EXPLOIT Apache Struts Attempt",
+                src=stable_src,
+                dst_port=443,
+                username=stable_user,
             )
         if scenario in {"waf-sqli-burst", "waf-xss-burst"}:
             sqli = scenario == "waf-sqli-burst"
             event = self._base(
-                "waf", now, event_id=EVENT_IDS["waf_sqli" if sqli else "waf_xss"],
-                category="web-attack", action="blocked", severity=9,
+                "waf",
+                now,
+                event_id=EVENT_IDS["waf_sqli" if sqli else "waf_xss"],
+                category="web-attack",
+                action="blocked",
+                severity=9,
                 signature="SQL Injection Attack Detected" if sqli else "XSS Attack Detected",
-                src=stable_src, dst_port=443, username=stable_user,
+                src=stable_src,
+                dst_port=443,
+                username=stable_user,
             )
-            request = "/login?id=1%27OR%271%27=%271" if sqli else "/search?q=%3Cscript%3Elab%3C/script%3E"
+            request = (
+                "/login?id=1%27OR%271%27=%271" if sqli else "/search?q=%3Cscript%3Elab%3C/script%3E"
+            )
             return replace(event, request_method="GET", request=request, status_code=403)
         if scenario == "firewall-deny-burst":
             event = self._base(
-                "linux_firewall", now, event_id=EVENT_IDS["linux_firewall"], category="firewall",
-                action="blocked", severity=7, signature="Linux firewall deny burst",
-                src=stable_src, dst_port=445, username=stable_user,
+                "linux_firewall",
+                now,
+                event_id=EVENT_IDS["linux_firewall"],
+                category="firewall",
+                action="blocked",
+                severity=7,
+                signature="Linux firewall deny burst",
+                src=stable_src,
+                dst_port=445,
+                username=stable_user,
             )
             return replace(event, vendor_message=self._linux_firewall_vendor(event))
         raise ValueError(f"unsupported scenario: {scenario}")
@@ -484,7 +578,7 @@ class EventGenerator:
             "signature": event.signature,
         }
         extension = "\t".join(f"{key}={_leef_escape(value)}" for key, value in fields.items())
-        return f"LEEF:2.0|SyntheticLab|QRadarLab|1.0|{event.event_id}|{extension}"
+        return f"LEEF:2.0|SyntheticLab|QRadarLab|1.0|{event.event_id}|0x09|{extension}"
 
     def _vendor(self, event: Event) -> str:
         if event.profile in {"ips", "waf"}:
@@ -500,7 +594,10 @@ class EventGenerator:
         if event.profile.startswith("windows"):
             return self._windows_vendor(event, int(event.event_id.split("-")[1]))
         if event.profile == "linux_auth":
-            return event.vendor_message or f"sshd: authentication {event.action} for {event.username} from {event.src}"
+            return (
+                event.vendor_message
+                or f"sshd: authentication {event.action} for {event.username} from {event.src}"
+            )
         if event.profile == "dns":
             return f"named: client {event.src}#{event.src_port}: query: {event.request} IN A +E"
         return (
@@ -519,9 +616,15 @@ class EventGenerator:
     @staticmethod
     def _linux_auth_vendor(event: Event, kind: str) -> str:
         if kind == "SSH_LOGIN_FAILED":
-            return f"sshd: Failed password for {event.username} from {event.src} port {event.src_port} ssh2"
+            return (
+                f"sshd: Failed password for {event.username} from {event.src} "
+                f"port {event.src_port} ssh2"
+            )
         if kind == "SSH_LOGIN_SUCCESS":
-            return f"sshd: Accepted password for {event.username} from {event.src} port {event.src_port} ssh2"
+            return (
+                f"sshd: Accepted password for {event.username} from {event.src} "
+                f"port {event.src_port} ssh2"
+            )
         if kind == "SUDO_COMMAND":
             return f"sudo: {event.username} : COMMAND=/usr/bin/id"
         if kind == "USER_CREATED":
@@ -638,7 +741,9 @@ def validate_options(options: Options) -> None:
                 raise ValueError(f"{name} must be a valid IPv4 address") from exc
             if parsed.version != 4:
                 raise ValueError(f"{name} must be an IPv4 address")
-    if options.fixed_host and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", options.fixed_host):
+    if options.fixed_host and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", options.fixed_host
+    ):
         raise ValueError("--fixed-host must be a valid synthetic hostname")
     if options.fixed_username and options.fixed_username not in SYNTHETIC_USERS:
         raise ValueError("--fixed-username must be a synthetic username")
@@ -713,17 +818,25 @@ def run(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate bounded synthetic security syslog for a QRadar lab.")
+    parser = argparse.ArgumentParser(
+        description="Generate bounded synthetic security syslog for a QRadar lab."
+    )
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--protocol", choices=("udp", "tcp"), default="udp")
     parser.add_argument("--eps", type=float, default=DEFAULT_EPS)
     parser.add_argument("--allow-high-rate", action="store_true")
     parser.add_argument(
-        "--types", "--profiles", dest="profiles", nargs="+",
-        choices=(*PROFILES, *PROFILE_ALIASES), default=list(PROFILES),
+        "--types",
+        "--profiles",
+        dest="profiles",
+        nargs="+",
+        choices=(*PROFILES, *PROFILE_ALIASES),
+        default=list(PROFILES),
     )
-    parser.add_argument("--format", dest="output_format", choices=("leef", "vendor"), default="leef")
+    parser.add_argument(
+        "--format", dest="output_format", choices=("leef", "vendor"), default="leef"
+    )
     parser.add_argument("--scenario", choices=SCENARIOS, default="normal")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--count", type=int, default=0)

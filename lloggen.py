@@ -3,6 +3,5 @@
 
 from tools.qradar_lab_loggen import main
 
-
 if __name__ == "__main__":
     raise SystemExit(main())
