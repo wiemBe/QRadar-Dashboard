@@ -1,4 +1,11 @@
-import { api, type CoverageSummary, type Page, type TechniqueCoverage } from "@/lib/api";
+import {
+  api,
+  type CoverageSummary,
+  type DataSourceCoverageView,
+  type Page,
+  type RuleCoverageView,
+  type TechniqueCoverage,
+} from "@/lib/api";
 import { StatCard } from "@/components/StatCard";
 import { Pagination } from "@/components/Pagination";
 import { formatDateTime, healthMeaning, healthTone } from "@/lib/health";
@@ -19,12 +26,16 @@ export default async function CoveragePage({
 
   let summary: CoverageSummary | null = null;
   let page: Page<TechniqueCoverage> | null = null;
+  let byRule: RuleCoverageView[] = [];
+  let byDataSource: DataSourceCoverageView[] = [];
   let error = false;
 
   try {
-    [summary, page] = await Promise.all([
+    [summary, page, byRule, byDataSource] = await Promise.all([
       api.coverageSummary(),
       api.coverageTechniques({ limit: PAGE_SIZE, offset }),
+      api.coverageByRule(),
+      api.coverageByDataSource(),
     ]);
   } catch {
     error = true;
@@ -118,7 +129,7 @@ export default async function CoveragePage({
                           {t.status.replace(/_/g, " ")}
                         </span>
                       </td>
-                      <td>{t.rule_count}</td>
+                      <td>{t.mapped_rule_count}</td>
                       <td>
                         {t.coverage_score == null
                           ? "—"
@@ -139,6 +150,44 @@ export default async function CoveragePage({
             </>
           )}
         </>
+      )}
+
+      <h3>Rule-centric view</h3>
+      {byRule.length === 0 ? (
+        <div className="notice">No rules have ATT&amp;CK technique mappings yet.</div>
+      ) : (
+        <table>
+          <thead><tr><th>Rule</th><th>Enabled</th><th>Health</th><th>Techniques</th><th>Evidence</th></tr></thead>
+          <tbody>
+            {byRule.map((r) => (
+              <tr key={r.rule_id}>
+                <td>{r.name}</td><td>{r.enabled ? "Yes" : "No"}</td>
+                <td><span className={`pill ${healthTone(r.health_status)}`}>{r.health_status.replace(/_/g, " ")}</span></td>
+                <td>{r.techniques.map((t) => t.technique_id).join(", ")}</td>
+                <td className="muted">{r.techniques.map((t) => `${t.source.toLowerCase()} ${Math.round(t.confidence * 100)}%`).join("; ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <h3>Data-source-centric view</h3>
+      {byDataSource.length === 0 ? (
+        <div className="notice">No rule-to-log-source dependencies are available from this QRadar inventory.</div>
+      ) : (
+        <table>
+          <thead><tr><th>Data source</th><th>Kind</th><th>Rules</th><th>Techniques</th><th>Evidence</th></tr></thead>
+          <tbody>
+            {byDataSource.map((d) => (
+              <tr key={`${d.kind}:${d.target_ref}`}>
+                <td>{d.target_name ?? d.target_ref}</td><td>{d.kind.replace(/_/g, " ")}</td>
+                <td>{d.rules.map((r) => r.name).join(", ")}</td>
+                <td>{d.techniques.join(", ") || "—"}</td>
+                <td className="muted">{d.rules.map((r) => `${r.dependency_source.toLowerCase()} ${Math.round(r.dependency_confidence * 100)}%`).join("; ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </>
   );
