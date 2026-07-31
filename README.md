@@ -429,6 +429,7 @@ Frontend:
 ```bash
 cd frontend
 npm install
+INTERNAL_API_BASE_URL=http://localhost:8000/api/v1 \
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1 npm run dev
 ```
 

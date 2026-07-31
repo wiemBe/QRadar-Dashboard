@@ -1,26 +1,4 @@
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
-
-interface Detail {
-  id: string;
-  name: string;
-  type_name: string | null;
-  description: string | null;
-  criticality: string;
-  owner: string | null;
-  owner_email: string | null;
-  qradar_status: string | null;
-  health_score: number | null;
-  health_breakdown: {
-    score: number;
-    freshness: number;
-    volume: number;
-    parsing: number;
-    collection: number;
-  } | null;
-  business_hours_only: boolean;
-  expected_interval_seconds: number | null;
-  last_event_time: string | null;
-}
+import { api } from "@/lib/api";
 
 export default async function LogSourceDetailPage({
   params,
@@ -28,8 +6,8 @@ export default async function LogSourceDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const res = await fetch(`${BASE}/log-sources/${id}`, { cache: "no-store" }).catch(() => null);
-  if (!res || !res.ok) {
+  const d = await api.logSource(id).catch(() => null);
+  if (!d) {
     return (
       <>
         <h2>Log Source Detail</h2>
@@ -37,7 +15,6 @@ export default async function LogSourceDetailPage({
       </>
     );
   }
-  const d: Detail = await res.json();
   const hb = d.health_breakdown;
 
   return (

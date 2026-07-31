@@ -184,6 +184,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     environment:
+      # Server Components run inside this container and must use Docker DNS.
+      INTERNAL_API_BASE_URL: http://backend:8000/api/v1
+      # Client Components run in the browser and use the published loopback API.
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
       NODE_ENV: production
     ports:

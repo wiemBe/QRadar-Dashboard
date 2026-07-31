@@ -3,7 +3,17 @@
 // All requests go through the backend API. The browser holds no QRadar
 // credentials and never contacts QRadar or the MCP service directly.
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+const PUBLIC_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+
+function baseUrl(): string {
+  // Server Components execute inside the frontend container, where localhost
+  // points back to Next.js. Browser-side actions still use the published host
+  // URL because Docker service names are not resolvable by the browser.
+  if (typeof window === "undefined") {
+    return process.env.INTERNAL_API_BASE_URL ?? PUBLIC_BASE;
+  }
+  return PUBLIC_BASE;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -12,7 +22,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${baseUrl()}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     cache: "no-store",
@@ -66,6 +76,28 @@ export interface LogSourceSummary {
   last_event_time: string | null;
   health_score: number | null;
   open_anomaly_count: number;
+}
+
+export interface LogSourceDetail {
+  id: string;
+  name: string;
+  type_name: string | null;
+  description: string | null;
+  criticality: string;
+  owner: string | null;
+  owner_email: string | null;
+  qradar_status: string | null;
+  health_score: number | null;
+  health_breakdown: {
+    score: number;
+    freshness: number;
+    volume: number;
+    parsing: number;
+    collection: number;
+  } | null;
+  business_hours_only: boolean;
+  expected_interval_seconds: number | null;
+  last_event_time: string | null;
 }
 
 // --- Phase 2 types ---------------------------------------------------------
@@ -414,6 +446,7 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
 export const api = {
   overview: () => request<SocOverview>("/overview"),
   logSources: () => request<LogSourceSummary[]>("/log-sources"),
+  logSource: (id: string) => request<LogSourceDetail>(`/log-sources/${id}`),
   syncLogSources: () => request<unknown>("/log-sources/sync", { method: "POST" }),
 
   searches: () => request<ScheduledSearch[]>("/searches"),
