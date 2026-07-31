@@ -34,6 +34,18 @@ class ProviderKind(StrEnum):
     MCP = "mcp"
 
 
+LAB_PROFILE: dict[str, int] = {
+    # One-minute buckets are the smallest interval the production validators
+    # permit. Four samples and 1/2 hysteresis make a demonstration complete in
+    # minutes while still requiring a baseline and an explicit recovery.
+    "collection_interval_seconds": 60,
+    "baseline_min_samples": 4,
+    "anomaly_open_after_intervals": 1,
+    "anomaly_resolve_after_intervals": 2,
+    "offense_collection_interval_seconds": 60,
+}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -50,6 +62,9 @@ class Settings(BaseSettings):
     # --- core ---------------------------------------------------------------
     environment: Environment = Environment.DEVELOPMENT
     debug: bool = False
+    # Explicit opt-in for the isolated synthetic-telemetry lab. The profile
+    # only accelerates stored-data observation; it never enables QRadar writes.
+    lab_mode: bool = False
     log_level: str = "INFO"
     api_prefix: str = "/api/v1"
 
@@ -347,6 +362,16 @@ class Settings(BaseSettings):
         if default is not None and v < default:
             raise ValueError("ARIEL_MAX_TIMEOUT_SECONDS must be >= ARIEL_DEFAULT_TIMEOUT_SECONDS")
         return v
+
+    @model_validator(mode="after")
+    def _apply_lab_profile(self) -> Settings:
+        if not self.lab_mode:
+            return self
+        if self.is_production:
+            raise ValueError("LAB_MODE is not permitted in production")
+        for field_name, value in LAB_PROFILE.items():
+            setattr(self, field_name, value)
+        return self
 
     @model_validator(mode="after")
     def _production_hardening(self) -> Settings:
