@@ -4,10 +4,10 @@ An **on-premises QRadar observability and SOC analytics platform**. It monitors 
 health, scheduled security searches, log-source anomalies, offenses, analytics-rule health and
 MITRE ATT&CK detection coverage — and it operates strictly **read-only** against QRadar.
 
-> **Status:** Phases 1–2 complete (architecture, data model + migrations, `MockQRadarProvider`,
-> SOC overview and log-source inventory; scheduled searches, metric collection, baselines,
-> anomaly detection, alert lifecycle and notification delivery). Phases 3–4 are scoped and
-> scaffolded. See [Roadmap](#roadmap).
+> **Status:** Phases 1–3 complete, including a verified live QRadar 7.6.0 FP1 vertical slice:
+> REST/Ariel collection, PostgreSQL persistence, Celery scheduling, guarded APIs, and offense,
+> rule-health, and detection-coverage dashboards. Phase 4 remains out of scope. See
+> [Roadmap](#roadmap) and [the Phase 3 handoff](docs/PHASE3-HANDOFF.md).
 
 ---
 
@@ -337,17 +337,50 @@ Beat runs these on a schedule, but you do not have to wait for it:
 
 ```bash
 python -m app.cli.sync log-sources --instance qradarce2
-python -m app.cli.sync offenses    --instance qradarce2
-python -m app.cli.sync rules       --instance qradarce2   # rules AND building blocks
+python -m app.cli.sync log-source-metrics --instance qradarce2
+python -m app.cli.sync offenses --instance qradarce2
+python -m app.cli.sync stale-offenses --instance qradarce2
+python -m app.cli.sync offense-aggregates --instance qradarce2
+python -m app.cli.sync rules --instance qradarce2   # rules AND building blocks
+python -m app.cli.sync rule-metrics --instance qradarce2
 python -m app.cli.sync rule-health --instance qradarce2
-python -m app.cli.sync coverage    --instance qradarce2
-python -m app.cli.sync all         --instance qradarce2   # in dependency order
+python -m app.cli.sync coverage --instance qradarce2
+python -m app.cli.sync all --instance qradarce2     # dependency order shown above
 ```
 
 Every sync is idempotent: re-running creates no duplicate rows, and a failed
 run does not advance its watermark. Add `--json` for machine-readable output.
 
 Then open <http://localhost:3000/offenses>, `/rules` and `/coverage`.
+
+#### 6. Run and verify the full local stack
+
+The production-style images copy source at build time; the application source tree is not bind
+mounted. SELinux stays enforcing and no service is privileged or mounts the Docker socket.
+
+```bash
+./deploy/load-secrets.sh
+docker compose up -d --build
+docker compose ps -a
+docker compose logs --tail=300
+
+curl --fail http://127.0.0.1:8000/api/v1/health/live
+curl --fail http://127.0.0.1:8000/api/v1/health/ready
+curl --fail http://127.0.0.1:8000/api/v1/providers/capabilities
+curl --fail http://127.0.0.1:3000/offenses
+
+docker compose exec celery-worker \
+  celery -A app.workers.celery_app inspect registered
+```
+
+Required long-running services are `postgres`, `redis`, `backend`, `celery-worker`,
+`celery-beat`, and `frontend`; each must report `healthy`. `migrate` is a one-shot service and must
+report exit code 0. `qradar-mcp` is intentionally excluded unless the `mcp` profile is requested.
+
+For a safe operational smoke test, run `sync all` twice. Natural-key row counts must remain stable,
+and every `collection_watermark` row must retain `consecutive_failures=0` and a null `last_error`.
+The second rule-inventory pass should converge to `unchanged`; log-source upserts may report
+`updated` while their natural-key row count remains unchanged.
 
 #### A note on what rule health can honestly report
 
@@ -356,10 +389,11 @@ building-block references and no log-source-type references, and there is no
 rule-statistics endpoint. So for a rule that has produced no offense, the
 platform has **no evidence either way** about whether it has ever fired.
 
-Such rules are reported as `INSUFFICIENT_DATA`, never as `NEVER_OBSERVED`.
-That distinction is deliberate: reporting a collection gap as a detection gap
-is the exact confusion this platform exists to remove. For the same reason,
-detection coverage shows `NOT_EVALUATED` rather than 0% until ATT&CK technique
+`RuleMetric` therefore derives only a lower bound from stored offense contributions. Each row is
+marked `provenance=offense_contribution`, `completeness=incomplete`, and `inferred=true`. A positive
+contribution proves that a rule fired; absence of a contribution does not prove zero. Silent rules
+remain `INSUFFICIENT_DATA`, never `NEVER_OBSERVED`, until a future complete source verifies a zero
+window. Detection coverage likewise shows `NOT_EVALUATED` rather than 0% until ATT&CK technique
 mappings exist.
 
 To also enable the MCP service (inventory / future AI), copy
@@ -395,9 +429,11 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1 npm run dev
 
 **Scheduling:** Celery + Redis is the default. Every background job is an `async` function in
 `app/workers/tasks.py` with a thin Celery shim around it, so the same orchestration runs unchanged
-under APScheduler — the documented MVP fallback for teams not running Celery. Celery beat drives
-five jobs: `collect_metrics`, `evaluate_anomalies`, `run_due_searches`, `dispatch_notifications`
-and a daily `rebuild_baselines`.
+under APScheduler — the documented MVP fallback for teams not running Celery. Celery Beat drives
+13 configurable jobs: log-source metrics/inventory, offense collection/staleness/aggregates,
+rule inventory/metrics/health, detection coverage, anomaly evaluation, scheduled searches,
+notification dispatch, and baseline rebuilds. Building blocks are collected in the same locked
+inventory pass as analytics rules.
 
 ## Testing
 
@@ -405,11 +441,14 @@ and a daily `rebuild_baselines`.
 cd backend
 pip install -e '.[dev]'
 ruff check app tests
-ENCRYPTION_KEY=<fernet-key> pytest          # unit tests run anywhere
+ENCRYPTION_KEY=<fernet-key> pytest -m "not integration"
 
 # Integration tests need PostgreSQL + TimescaleDB:
 export TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/qradar_obs_test
 pytest -m integration
+pytest
+alembic upgrade head
+alembic check
 ```
 
 Unit tests cover the health-score arithmetic, output sanitization, mock-provider determinism, the
@@ -417,23 +456,30 @@ MCP allowlist and no-AQL capability, TLS refusal, encrypted-column round-trip, p
 hardening, robust statistics, alert fingerprinting, notification routing and cron expansion.
 Integration tests exercise inventory sync, metric collection, baselines, the anomaly engine, the
 search executor and scheduler, search alerting, notification dispatch, the result-trend endpoint and
-the API against a real database, and **skip cleanly** when `TEST_DATABASE_URL` is unset. All QRadar
+the API against a real database. All QRadar
 responses in tests are mocked and no notification is ever really sent (`MockNotifier`).
 
-Current suite: **220 tests — 129 unit + 91 integration, all passing with 0 skipped** against a real
-`timescale/timescaledb:2.17.2-pg16` instance (`make db-test-up && make test-integration`).
-`ruff check` clean; `mypy app` reports the unchanged 30-error Phase 1 baseline.
+Current suite: **881 tests — 634 unit + 247 integration, all passing with 0 skipped** against a real
+`timescale/timescaledb:2.17.2-pg16` instance. `ruff check` is clean; `mypy app` reports **28 existing
+errors in 16 files**, improved from the Phase 3 baseline of 29 in 17, with no new errors. Alembic
+upgrades a fresh database through `0003` and reports no drift.
 
 Frontend tests run under Vitest + Testing Library:
 
 ```bash
 cd frontend
-npm install          # no lockfile was committed before; package-lock.json now exists
+npm ci
+npm audit --omit=dev
 npm run lint
 npm run typecheck
-npm test             # 22 component tests
+npm test             # 64 tests
 npm run build
 ```
+
+The production build succeeds on Next.js **15.5.22**. The production-only audit currently reports
+5 transitive findings (2 moderate, 3 high): ECharts, PostCSS, and sharp. npm offers only breaking or
+incorrect forced resolutions for this pinned Next.js line, so no `--force` override is applied; see
+the Phase 3 handoff for the exact advisories and mitigations.
 
 Note on tooling: the enforced gates are `ruff check` and `pytest` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). `mypy` runs advisory-only until the Phase 1
@@ -538,8 +584,9 @@ lints and updates this README.
 - **Phase 2 ✅** — scheduled searches, metric collection, anomaly detection, alert lifecycle +
   notifications (Teams / email / Slack / generic webhook / syslog), operator action UI
   (acknowledge / resolve / manual run) and the ECharts result-trend chart.
-- **Phase 3** — offenses, analytics rules, rule health, detection coverage; the real
-  `QRadarRestProvider` and `QRadarMCPProvider`.
+- **Phase 3 ✅** — live read-only QRadar REST/Ariel collection, offenses, analytics rules,
+  provenance-aware rule metrics and health, detection coverage, guarded APIs, Celery scheduling,
+  MCP audit persistence, and operator dashboards.
 - **Phase 4** — security hardening, expanded tests, documentation, observability.
 
 ## License
