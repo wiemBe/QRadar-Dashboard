@@ -803,3 +803,71 @@ Phase 3 remains frozen. Phase 3.5 adds only an isolated lab-validation layer:
 Operating instructions and exact lab values are in
 [LAB-SYNTHETIC-TELEMETRY.md](LAB-SYNTHETIC-TELEMETRY.md). Sanitized live evidence is maintained in
 [LAB-DEMO-RESULTS.md](LAB-DEMO-RESULTS.md).
+
+---
+
+# Phase A addendum — behavioral anomaly platform (2026-08-02)
+
+Phase 3 offense, rule, coverage, provider, collector and audit functionality is
+**unchanged and preserved**. Phase A adds the behavioral layer on top of it and
+reframes those subsystems as supporting infrastructure rather than the product's
+central objective. See [BEHAVIORAL-ANALYTICS-ARCHITECTURE.md](./BEHAVIORAL-ANALYTICS-ARCHITECTURE.md)
+and [PHASE-A-SOURCE-VOLUME-ANOMALY.md](./PHASE-A-SOURCE-VOLUME-ANOMALY.md).
+
+## State at this checkpoint
+
+- Branch `main`, HEAD after the Phase A backend slice.
+- Alembic head **0004**; fresh upgrade and `alembic check` clean.
+- **1060 tests passed, 0 failed, 0 skipped** (was 942 before Phase A tests).
+- Ruff clean. Mypy **31 errors in 18 files**, against a measured baseline of
+  32/18 on this branch — no new errors.
+- 14 Celery tasks, 14 beat schedules.
+
+> The starting state recorded at the top of this document (24 mypy errors in 16
+> files, 881 tests) did not match the repository when Phase A began. The
+> measured baseline on `main` was 32 errors in 18 files with 942 tests.
+
+## What landed
+
+| Commit | Scope |
+|---|---|
+| `docs(anomaly): define behavioral analytics architecture and roadmap` | Product goal, Phase A–F roadmap, engine concepts |
+| `feat(anomaly): add seasonal source-volume baseline and detectors` | Completeness, conjunctive guards, degenerate-MAD fallback, lifecycle, migration 0004 |
+| `feat(anomaly): add anomaly evidence and contributor analysis` | Bounded Ariel dimension aggregation, contributor arithmetic, typed storage, task, API |
+| `test(anomaly): cover behavioral detection and explanation lifecycle` | 118 new tests |
+
+## Not yet done
+
+1. **Frontend.** Behavioral overview, source behavior page, anomaly list, and
+   the investigation detail page. The API they need is complete and tested.
+2. **Generator scenarios.** The eight Phase A scenarios and their flags in
+   `tools/qradar_lab_loggen.py`. The existing 17 scenarios are untouched.
+3. **Live QRadar validation.** Not performed.
+
+## Live validation status — explicitly separated
+
+**Automated implementation status:** complete for the backend slice, gated as
+above.
+
+**Live validation status:** **not started.** Every number reported for Phase A so
+far comes from automated tests against the mock provider and a real
+PostgreSQL/TimescaleDB instance — not from live QRadar telemetry. No synthetic
+events have been sent to 192.168.122.50 in this workstream.
+
+**Blocker:** none technical. The work was cut at a coherent boundary on session
+budget, with the tree clean and all gates green.
+
+## Exact next task
+
+Implement the frontend behavioral experience against the existing API:
+
+1. `/behavior` overview — consume `GET /api/v1/anomalies/summary`.
+2. `/behavior/sources/[id]` — observed vs expected with the p05/p95 band
+   overlaid, from `/behavior/sources/{id}/metrics` and `/baselines`.
+3. `/anomalies` list — from `GET /api/v1/anomalies` with its filters.
+4. `/anomalies/[id]` investigation detail — the highest-priority page. Render
+   the contributor tables per dimension, and render `UNAVAILABLE` dimensions
+   explicitly rather than hiding them; a hidden unavailable dimension is one the
+   operator will assume was clean.
+
+Then the generator scenarios, then live lab validation.
