@@ -39,6 +39,94 @@ class AnomalyType(StrEnum):
     REPEATED_PAYLOAD = "REPEATED_PAYLOAD"
 
 
+class AnomalyState(StrEnum):
+    """Explicit anomaly lifecycle.
+
+    INSUFFICIENT_DATA is a first-class state, not a synonym for NORMAL: "the
+    source is behaving" and "we cannot yet tell whether the source is behaving"
+    drive different operator actions, and collapsing them lets an unbaselined
+    source masquerade as healthy.
+
+    CANDIDATE exists so a single abnormal bucket is recorded without being
+    promoted to an incident; RECOVERING exists so a single normal bucket does
+    not immediately close one. Both directions need hysteresis or the state
+    flaps on every bucket.
+    """
+
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    NORMAL = "NORMAL"
+    CANDIDATE = "CANDIDATE"
+    OPEN = "OPEN"
+    RECOVERING = "RECOVERING"
+    RESOLVED = "RESOLVED"
+    SUPPRESSED = "SUPPRESSED"
+
+
+#: States in which an incident is live and must not be duplicated by a second
+#: OPEN for the same (log source, detector type).
+ACTIVE_ANOMALY_STATES = frozenset(
+    {AnomalyState.CANDIDATE, AnomalyState.OPEN, AnomalyState.RECOVERING}
+)
+
+
+class BucketCompleteness(StrEnum):
+    """Whether a collector observed a whole time bucket.
+
+    Only COMPLETE buckets may enter a baseline or produce a verdict. PARTIAL
+    and MISSING buckets are displayable but never authoritative — treating a
+    half-collected interval as a real observation is how a collection outage
+    turns into a fleet-wide false VOLUME_DROP.
+    """
+
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    MISSING = "MISSING"
+
+
+class EvidenceStatus(StrEnum):
+    """Completeness of an anomaly's bounded explanation package.
+
+    UNAVAILABLE and FAILED are distinct: "this source's DSM emits none of the
+    requested fields" is a permanent property of the source, while "the Ariel
+    query did not complete" is a transient condition worth retrying.
+    """
+
+    NOT_REQUESTED = "NOT_REQUESTED"
+    PENDING = "PENDING"
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    UNAVAILABLE = "UNAVAILABLE"
+    FAILED = "FAILED"
+
+
+class DimensionAvailability(StrEnum):
+    """Per-dimension outcome within an explanation package.
+
+    A dimension absent from a source's DSM output is UNAVAILABLE and must never
+    be rendered as a count of zero — that would invent evidence of absence.
+    """
+
+    AVAILABLE = "AVAILABLE"
+    TRUNCATED = "TRUNCATED"
+    UNAVAILABLE = "UNAVAILABLE"
+    FAILED = "FAILED"
+
+
+class RobustScoreStatus(StrEnum):
+    """Whether the robust z-score was usable for a verdict.
+
+    DEGENERATE means MAD was zero (more than half the baseline samples were
+    identical — common for a steady low-volume source). The score is then not
+    meaningful, but the source must not therefore be declared normal: the
+    detector falls back to the deterministic expected-bound, ratio and
+    absolute-delta tests and records that it did so.
+    """
+
+    OK = "OK"
+    DEGENERATE = "DEGENERATE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 class AlertStatus(StrEnum):
     OPEN = "OPEN"
     ACKNOWLEDGED = "ACKNOWLEDGED"

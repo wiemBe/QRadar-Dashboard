@@ -45,6 +45,42 @@ class Observation:
     values: dict[str, float]
 
 
+@dataclass
+class ExclusionTally:
+    """Why candidate buckets were dropped, for baseline completeness.
+
+    An unexpectedly thin baseline is a support question ("why is this source
+    still INSUFFICIENT_DATA after three weeks?"). Recording the reason at build
+    time answers it without re-running the build against history that may have
+    since aged out.
+    """
+
+    maintenance: int = 0
+    off_hours: int = 0
+    known_anomaly: int = 0
+    incomplete: int = 0
+    unfinished: int = 0
+
+    @property
+    def total(self) -> int:
+        return (
+            self.maintenance
+            + self.off_hours
+            + self.known_anomaly
+            + self.incomplete
+            + self.unfinished
+        )
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "maintenance": self.maintenance,
+            "off_hours": self.off_hours,
+            "known_anomaly": self.known_anomaly,
+            "incomplete": self.incomplete,
+            "unfinished": self.unfinished,
+        }
+
+
 class BaselineBuilder:
     def __init__(self, session: AsyncSession, *, settings: Settings | None = None) -> None:
         self.session = session
@@ -57,9 +93,13 @@ class BaselineBuilder:
         now = now or datetime.now(UTC)
         lookback_start = now - timedelta(days=self.settings.baseline_lookback_days)
 
-        observations = await self._load_clean_observations(log_source, lookback_start, now)
+        observations, tally, candidates = await self._load_clean_observations(
+            log_source, lookback_start, now
+        )
 
-        # Group by (metric, weekday, hour).
+        # Group by (metric, weekday, hour). Phase A seasonality is ISO weekday
+        # crossed with hour of day: 168 cells, capturing the working day and the
+        # weekend without needing months of history to populate.
         cells: dict[tuple[str, int, int], list[float]] = {}
         for obs in observations:
             weekday = obs.bucket_start.isoweekday()
@@ -67,10 +107,24 @@ class BaselineBuilder:
             for metric, value in obs.values.items():
                 cells.setdefault((metric, weekday, hour), []).append(value)
 
+        # Completeness is a property of the whole rebuild: what fraction of the
+        # candidate buckets in the lookback actually survived exclusion. A cell
+        # built from 4 of 28 buckets is far weaker than one built from 26 even
+        # when both clear the minimum sample count.
+        completeness = (len(observations) / candidates) if candidates else 0.0
+
         written = 0
         for (metric, weekday, hour), values in cells.items():
             await self._upsert_cell(
-                log_source.id, metric, weekday, hour, values, lookback_start, now
+                log_source.id,
+                metric,
+                weekday,
+                hour,
+                values,
+                lookback_start,
+                now,
+                completeness=completeness,
+                tally=tally,
             )
             written += 1
         await self.session.flush()
@@ -78,7 +132,9 @@ class BaselineBuilder:
 
     async def _load_clean_observations(
         self, log_source: LogSource, start: datetime, end: datetime
-    ) -> list[Observation]:
+    ) -> tuple[list[Observation], ExclusionTally, int]:
+        """Return usable observations, why the rest were dropped, and how many
+        candidate buckets were considered."""
         rows = list(
             (
                 await self.session.scalars(
@@ -94,10 +150,22 @@ class BaselineBuilder:
         )
 
         excluded = await self._excluded_intervals(log_source, start, end)
+        tally = ExclusionTally()
 
+        # The bucket containing `end` is still accumulating. Its partial count
+        # would drag every cell it lands in downwards, so it never enters a
+        # baseline regardless of what completeness it claims.
         observations: list[Observation] = []
         for m in rows:
-            if self._is_excluded(m.bucket_start, log_source, excluded):
+            if m.bucket_end > end:
+                tally.unfinished += 1
+                continue
+            if not m.is_complete:
+                tally.incomplete += 1
+                continue
+            reason = self._exclusion_reason(m.bucket_start, log_source, excluded)
+            if reason is not None:
+                setattr(tally, reason, getattr(tally, reason) + 1)
                 continue
             observations.append(
                 Observation(
@@ -108,7 +176,7 @@ class BaselineBuilder:
                     },
                 )
             )
-        return observations
+        return observations, tally, len(rows)
 
     async def _excluded_intervals(
         self, log_source: LogSource, start: datetime, end: datetime
@@ -131,23 +199,27 @@ class BaselineBuilder:
             spans.append((a.detected_at, span_end))
         return spans
 
-    def _is_excluded(
+    def _exclusion_reason(
         self,
         when: datetime,
         log_source: LogSource,
         excluded: list[tuple[datetime, datetime]],
-    ) -> bool:
+    ) -> str | None:
+        """The ExclusionTally field name to charge this bucket to, or None."""
         # Maintenance window.
         if log_source.maintenance_mode and (
             log_source.maintenance_until is None or when <= log_source.maintenance_until
         ):
-            return True
+            return "maintenance"
         # Business-hours-only sources: off-hours intervals are expected-empty and
         # must not be baselined as if they were real observations.
         if log_source.business_hours_only and not self._in_business_hours(when, log_source):
-            return True
-        # Known anomaly spans.
-        return any(lo <= when <= hi for lo, hi in excluded)
+            return "off_hours"
+        # Known anomaly spans. An ongoing incident must not poison the baseline
+        # it will later be judged against.
+        if any(lo <= when <= hi for lo, hi in excluded):
+            return "known_anomaly"
+        return None
 
     def _in_business_hours(self, when: datetime, log_source: LogSource) -> bool:
         weekday = when.isoweekday()
@@ -164,6 +236,9 @@ class BaselineBuilder:
         values: list[float],
         window_start: datetime,
         window_end: datetime,
+        *,
+        completeness: float,
+        tally: ExclusionTally,
     ) -> None:
         med = rstats.median(values)
         mad_value = rstats.mad(values, med)
@@ -199,6 +274,9 @@ class BaselineBuilder:
                     computed_at=window_end,
                     baseline_version=1,
                     observations=stored_obs,
+                    completeness=completeness,
+                    excluded_sample_count=tally.total,
+                    exclusion_counts=tally.as_dict(),
                 )
             )
         else:
@@ -213,3 +291,6 @@ class BaselineBuilder:
             existing.computed_at = window_end
             existing.baseline_version += 1
             existing.observations = stored_obs
+            existing.completeness = completeness
+            existing.excluded_sample_count = tally.total
+            existing.exclusion_counts = tally.as_dict()

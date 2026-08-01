@@ -7,9 +7,16 @@ autogenerate and the test fixtures both rely on. Keep this list complete.
 from app.models.alert import Alert, AlertNotification
 from app.models.base import Base
 from app.models.config_change import ConfigurationChange, ConfigurationSnapshot
+from app.models.explanation import (
+    EXPLANATION_SCHEMA_VERSION,
+    AnomalyExplanation,
+    AnomalyExplanationContributor,
+    AnomalyExplanationDimension,
+)
 from app.models.identity import AuditLog, Role, User, user_role
 from app.models.instance import QRadarInstance
 from app.models.log_source import (
+    AnomalyStateTransition,
     LogSource,
     LogSourceAnomaly,
     LogSourceBaseline,
@@ -47,10 +54,15 @@ HYPERTABLES: dict[str, str] = {
 }
 
 __all__ = [
+    "EXPLANATION_SCHEMA_VERSION",
     "HYPERTABLES",
     "Alert",
     "AlertNotification",
     "AnalyticsRule",
+    "AnomalyExplanation",
+    "AnomalyExplanationContributor",
+    "AnomalyExplanationDimension",
+    "AnomalyStateTransition",
     "AuditLog",
     "Base",
     "CollectionWatermark",

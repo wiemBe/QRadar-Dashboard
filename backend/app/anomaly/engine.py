@@ -33,16 +33,29 @@ from app.anomaly.detectors import (
     MetricPoint,
 )
 from app.anomaly.evidence import AnomalyEvidence
+from app.anomaly.lifecycle import LifecycleDecision, LifecycleInput, next_state
 from app.anomaly.thresholds import ThresholdResolver
 from app.core.config import Settings, get_settings
-from app.models.enums import AnomalyType, DetectorSignal
+from app.models.enums import (
+    ACTIVE_ANOMALY_STATES,
+    AnomalyState,
+    AnomalyType,
+    BucketCompleteness,
+    DetectorSignal,
+    EvidenceStatus,
+)
 from app.models.log_source import (
+    AnomalyStateTransition,
     LogSource,
     LogSourceAnomaly,
     LogSourceBaseline,
     LogSourceDetectorState,
     LogSourceMetric,
 )
+
+#: Detector types whose incidents warrant a bounded explanation package. A
+#: silence has no volume to attribute, so there is nothing to explain.
+EXPLAINABLE_TYPES = frozenset({AnomalyType.VOLUME_SPIKE, AnomalyType.VOLUME_DROP})
 
 
 @dataclass
@@ -52,7 +65,34 @@ class EvaluationReport:
     opened: list[str] = field(default_factory=list)
     resolved: list[str] = field(default_factory=list)
     anomalous: list[str] = field(default_factory=list)
+    candidates: list[str] = field(default_factory=list)
+    recovering: list[str] = field(default_factory=list)
+    #: Final lifecycle state per detector type after this bucket.
+    states: dict[str, str] = field(default_factory=dict)
     skipped_reason: str | None = None
+
+
+def _as_float(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) else None
+
+
+def _as_int(value: object) -> int | None:
+    return int(value) if isinstance(value, int | float) else None
+
+
+def _is_worse(anomaly: LogSourceAnomaly, observed: float) -> bool:
+    """Whether `observed` is a more extreme reading than the one on record.
+
+    Direction matters: for a spike the peak is the worst case, for a drop and a
+    silence it is the trough.
+    """
+    current = anomaly.observed_value
+    if current is None:
+        return True
+    # `==`: anomaly_type is a String column, so this is a plain str on load.
+    if anomaly.anomaly_type == AnomalyType.VOLUME_SPIKE:
+        return observed > current
+    return observed < current
 
 
 class AnomalyEngine:
@@ -125,6 +165,10 @@ class AnomalyEngine:
         point = MetricPoint(
             interval_start=metric.bucket_start,
             interval_end=metric.bucket_start + timedelta(seconds=metric.bucket_seconds),
+            # Coerced, not passed through: String-typed enum columns come back
+            # from the database as plain str, and the detectors compare
+            # identity. Normalizing here keeps that logic pure and safe.
+            completeness=BucketCompleteness(metric.completeness),
             event_count=metric.event_count,
             average_eps=metric.average_eps,
             peak_eps=metric.peak_eps,
@@ -147,7 +191,39 @@ class AnomalyEngine:
             expected_interval_seconds=expected_interval,
             recent_signatures=recent,
             is_expected_active=self._is_expected_active(log_source, metric.bucket_start),
+            preceding_empty_buckets=await self._preceding_empty_buckets(
+                log_source.id, metric
+            ),
         )
+
+    async def _preceding_empty_buckets(
+        self, log_source_id: uuid.UUID, metric: LogSourceMetric, limit: int = 12
+    ) -> int:
+        """Consecutive empty buckets immediately before this one.
+
+        Only complete buckets count towards the streak. A gap we failed to
+        collect is not evidence that the source was silent, and letting it
+        extend the streak would make a collector outage graduate into NO_EVENTS.
+        """
+        rows = list(
+            (
+                await self.session.scalars(
+                    select(LogSourceMetric)
+                    .where(
+                        LogSourceMetric.log_source_id == log_source_id,
+                        LogSourceMetric.bucket_start < metric.bucket_start,
+                    )
+                    .order_by(LogSourceMetric.bucket_start.desc())
+                    .limit(limit)
+                )
+            ).all()
+        )
+        streak = 0
+        for row in rows:
+            if not row.is_complete or row.event_count > 0:
+                break
+            streak += 1
+        return streak
 
     async def _baseline_cells(
         self, log_source_id: uuid.UUID, weekday: int, hour: int
@@ -164,6 +240,7 @@ class AnomalyEngine:
             cells[b.metric_name] = BaselineCell(
                 median=b.median, mad=b.mad, p05=b.p05, p95=b.p95,
                 sample_count=b.sample_count, is_reliable=b.is_reliable,
+                completeness=b.completeness, baseline_version=b.baseline_version,
             )
         return cells
 
@@ -234,44 +311,152 @@ class AnomalyEngine:
         elif signal is DetectorSignal.HEALTHY:
             state.consecutive_healthy += 1
             state.consecutive_anomalous = 0
-        # UNKNOWN: leave counters untouched.
+        # UNKNOWN: leave counters untouched. Missing or unreadable data must
+        # neither confirm an anomaly nor count towards recovery.
 
         state.last_interval_start = metric.bucket_start
 
-        if (
-            not state.is_open
-            and signal is DetectorSignal.ANOMALOUS
-            and state.consecutive_anomalous >= thresholds.open_after
-        ):
-            await self._open(log_source, metric, evidence, state, in_maintenance, report)
-        elif state.is_open and signal is DetectorSignal.ANOMALOUS:
-            await self._refresh(log_source, evidence, state, in_maintenance)
-        elif (
-            state.is_open
-            and signal is DetectorSignal.HEALTHY
-            and state.consecutive_healthy >= thresholds.resolve_after
-        ):
-            await self._resolve(log_source, evidence, state, report)
-
+        decision = next_state(
+            LifecycleInput(
+                state=AnomalyState(state.state),
+                signal=signal,
+                consecutive_anomalous=state.consecutive_anomalous,
+                consecutive_healthy=state.consecutive_healthy,
+                open_after=thresholds.open_after,
+                resolve_after=thresholds.resolve_after,
+                insufficient_data=evidence.insufficient_data,
+                suppressed=(
+                    in_maintenance
+                    and AnomalyState(state.state) not in ACTIVE_ANOMALY_STATES
+                ),
+            )
+        )
+        await self._apply_transition(
+            log_source, metric, evidence, state, decision, in_maintenance, report
+        )
         await self.session.flush()
 
-    async def _open(
+    async def _apply_transition(
         self,
         log_source: LogSource,
         metric: LogSourceMetric,
         evidence: AnomalyEvidence,
         state: LogSourceDetectorState,
+        decision: LifecycleDecision,
         in_maintenance: bool,
         report: EvaluationReport,
     ) -> None:
+        """Persist one lifecycle move, its audit row, and its side effects."""
+        previous = AnomalyState(state.state)
+        target = decision.state
+        report.states[evidence.anomaly_type.value] = target.value
+
+        if target is previous:
+            # No move. An already-open incident still gets its evidence
+            # refreshed so an operator can see how long it has persisted.
+            if previous is AnomalyState.OPEN:
+                await self._refresh(log_source, evidence, state, in_maintenance)
+                await self._touch_anomaly(state, metric, evidence)
+            return
+
+        state.state = target
+
+        if target is AnomalyState.CANDIDATE:
+            anomaly = await self._create_incident(
+                log_source, metric, evidence, in_maintenance
+            )
+            state.active_anomaly_id = anomaly.id
+            await self._record_transition(
+                anomaly, previous, target, metric, decision.reason, evidence
+            )
+            report.candidates.append(evidence.anomaly_type.value)
+            return
+
+        anomaly = await self._active_anomaly(state)
+
+        if target is AnomalyState.OPEN:
+            # Confirmation threshold of 1: the incident opens on the same bucket
+            # that created it, so there is nothing to promote yet.
+            incident = anomaly or await self._create_incident(
+                log_source, metric, evidence, in_maintenance
+            )
+            state.active_anomaly_id = incident.id
+            await self._promote_to_open(
+                log_source, metric, evidence, state, incident, in_maintenance, report
+            )
+            await self._record_transition(
+                incident, previous, target, metric, decision.reason, evidence
+            )
+            return
+
+        if anomaly is not None:
+            await self._record_transition(
+                anomaly, previous, target, metric, decision.reason, evidence
+            )
+
+        if target is AnomalyState.RECOVERING:
+            if anomaly is not None:
+                anomaly.state = AnomalyState.RECOVERING
+                # The abnormal telemetry ended with the last abnormal bucket,
+                # not with the normal one that revealed the recovery.
+                anomaly.anomaly_end = metric.bucket_start
+            report.recovering.append(evidence.anomaly_type.value)
+            return
+
+        if target is AnomalyState.RESOLVED:
+            await self._resolve(log_source, evidence, state, anomaly, report)
+            return
+
+        if target is AnomalyState.SUPPRESSED:
+            if anomaly is not None:
+                anomaly.state = AnomalyState.SUPPRESSED
+                anomaly.suppressed = True
+                anomaly.suppression_reason = anomaly.suppression_reason or "maintenance window"
+            state.is_open = False
+            return
+
+        # NORMAL or INSUFFICIENT_DATA: no incident is live any more. A CANDIDATE
+        # that never opened is closed out as a non-incident rather than left
+        # dangling, so a later abnormal bucket starts a fresh one.
+        if anomaly is not None and previous is AnomalyState.CANDIDATE:
+            anomaly.state = target
+            anomaly.anomaly_end = metric.bucket_start
+        state.active_anomaly_id = None
+        state.is_open = False
+
+    async def _create_incident(
+        self,
+        log_source: LogSource,
+        metric: LogSourceMetric,
+        evidence: AnomalyEvidence,
+        in_maintenance: bool,
+    ) -> LogSourceAnomaly:
+        """Record a new incident in CANDIDATE. Not yet an alert.
+
+        Persisting at candidate time rather than at open time means the first
+        abnormal bucket is captured with its evidence even if the incident is
+        never confirmed — which is exactly the data needed to tune away a noisy
+        detector.
+        """
+        facts = evidence.extra or {}
         anomaly = LogSourceAnomaly(
             log_source_id=log_source.id,
             anomaly_type=evidence.anomaly_type,
             severity=evidence.severity,
+            state=AnomalyState.CANDIDATE,
             detected_at=metric.bucket_start,
+            anomaly_start=metric.bucket_start,
             observed_value=evidence.observed_value,
             expected_value=evidence.expected_value,
             deviation_score=evidence.deviation_score,
+            confidence=evidence.confidence,
+            deviation_ratio=_as_float(facts.get("ratio")),
+            robust_z=_as_float(facts.get("robust_z")),
+            absolute_delta=_as_float(facts.get("absolute_delta_events")),
+            consecutive_buckets=1,
+            baseline_version=_as_int(facts.get("baseline_version")),
+            policy_version=self.settings.anomaly_policy_version,
+            evidence_status=EvidenceStatus.NOT_REQUESTED,
             explanation=evidence.reason,
             details=evidence.to_dict(),
             suppressed=in_maintenance,
@@ -279,9 +464,38 @@ class AnomalyEngine:
         )
         self.session.add(anomaly)
         await self.session.flush()
+        return anomaly
+
+    async def _promote_to_open(
+        self,
+        log_source: LogSource,
+        metric: LogSourceMetric,
+        evidence: AnomalyEvidence,
+        state: LogSourceDetectorState,
+        anomaly: LogSourceAnomaly,
+        in_maintenance: bool,
+        report: EvaluationReport,
+    ) -> None:
+        anomaly.state = AnomalyState.OPEN
+        anomaly.opened_at = self._clock()
+        anomaly.anomaly_end = None
+        anomaly.severity = evidence.severity
+        await self._touch_anomaly(state, metric, evidence)
+
         state.is_open = True
         state.open_anomaly_id = anomaly.id
+        state.active_anomaly_id = anomaly.id
         report.opened.append(evidence.anomaly_type.value)
+
+        # A confirmed volume anomaly is what the investigation exists for. Mark
+        # the package pending here; the collector task fills it asynchronously
+        # so detection never blocks on an Ariel round-trip.
+        if (
+            self.settings.explanation_enabled
+            and evidence.anomaly_type in EXPLAINABLE_TYPES
+            and not in_maintenance
+        ):
+            anomaly.evidence_status = EvidenceStatus.PENDING
 
         # Maintenance anomalies are recorded but never alerted.
         if in_maintenance:
@@ -293,6 +507,66 @@ class AnomalyEngine:
         # update to an already-open alert has transition=None).
         if self._enqueuer is not None and result.transition is not None:
             await self._enqueuer.enqueue(result.alert, result.transition)
+
+    async def _touch_anomaly(
+        self,
+        state: LogSourceDetectorState,
+        metric: LogSourceMetric,
+        evidence: AnomalyEvidence,
+    ) -> None:
+        """Refresh the live incident's measurements from the current bucket."""
+        anomaly = await self._active_anomaly(state)
+        if anomaly is None:
+            return
+        facts = evidence.extra or {}
+        anomaly.consecutive_buckets = max(
+            anomaly.consecutive_buckets, state.consecutive_anomalous
+        )
+        # Track the worst observation seen, not merely the latest: an operator
+        # asking "how bad did this get?" must not get the tail of a recovery.
+        if evidence.is_anomalous:
+            anomaly.anomaly_end = metric.bucket_start + timedelta(
+                seconds=metric.bucket_seconds
+            )
+            observed = evidence.observed_value
+            if observed is not None and _is_worse(anomaly, observed):
+                anomaly.observed_value = observed
+                anomaly.deviation_score = evidence.deviation_score
+                anomaly.deviation_ratio = _as_float(facts.get("ratio"))
+                anomaly.robust_z = _as_float(facts.get("robust_z"))
+                anomaly.absolute_delta = _as_float(facts.get("absolute_delta_events"))
+                anomaly.explanation = evidence.reason
+                anomaly.details = evidence.to_dict()
+
+    async def _active_anomaly(
+        self, state: LogSourceDetectorState
+    ) -> LogSourceAnomaly | None:
+        if state.active_anomaly_id is None:
+            return None
+        return await self.session.get(LogSourceAnomaly, state.active_anomaly_id)
+
+    async def _record_transition(
+        self,
+        anomaly: LogSourceAnomaly,
+        from_state: AnomalyState,
+        to_state: AnomalyState,
+        metric: LogSourceMetric,
+        reason: str,
+        evidence: AnomalyEvidence,
+    ) -> None:
+        self.session.add(
+            AnomalyStateTransition(
+                anomaly_id=anomaly.id,
+                from_state=from_state,
+                to_state=to_state,
+                occurred_at=self._clock(),
+                bucket_start=metric.bucket_start,
+                reason=reason,
+                actor="anomaly-engine",
+                observed_value=evidence.observed_value,
+                expected_value=evidence.expected_value,
+            )
+        )
 
     def _alert_input(
         self, log_source: LogSource, evidence: AnomalyEvidence, anomaly_id: uuid.UUID | None
@@ -339,14 +613,17 @@ class AnomalyEngine:
         log_source: LogSource,
         evidence: AnomalyEvidence,
         state: LogSourceDetectorState,
+        anomaly: LogSourceAnomaly | None,
         report: EvaluationReport,
     ) -> None:
-        if state.open_anomaly_id is not None:
-            anomaly = await self.session.get(LogSourceAnomaly, state.open_anomaly_id)
-            if anomaly is not None and anomaly.resolved_at is None:
-                anomaly.resolved_at = self._clock()
+        if anomaly is not None and anomaly.resolved_at is None:
+            anomaly.state = AnomalyState.RESOLVED
+            anomaly.resolved_at = self._clock()
         state.is_open = False
         state.open_anomaly_id = None
+        # Clearing the active incident is what makes a later recurrence open a
+        # new one rather than reviving this closed incident.
+        state.active_anomaly_id = None
         report.resolved.append(evidence.anomaly_type.value)
         result = await self.alerts.resolve_by_fingerprint(
             anomaly_fingerprint(log_source.id, evidence.anomaly_type.value),

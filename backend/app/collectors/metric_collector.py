@@ -24,6 +24,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.models.enums import BucketCompleteness
 from app.models.instance import QRadarInstance
 from app.models.log_source import LogSource, LogSourceMetric
 from app.models.monitoring import CollectionWatermark
@@ -66,6 +67,13 @@ class MetricCollector:
         self.settings = settings or get_settings()
         self._clock = clock or (lambda: datetime.now(UTC))
 
+    @property
+    def _collection_source(self) -> str:
+        """Which subsystem produced a bucket. QRadar exposes no per-log-source
+        metric endpoint, so live volume is always a bounded Ariel aggregate."""
+        name = type(self.provider).__name__.lower()
+        return "mock" if "mock" in name else "ariel_aggregate"
+
     async def collect(self, instance: QRadarInstance) -> CollectionReport:
         interval = self.settings.collection_interval_seconds
         now = self._clock()
@@ -85,8 +93,14 @@ class MetricCollector:
             last_done: datetime | None = watermark.watermark_at
             for start in intervals:
                 end = start + timedelta(seconds=interval)
-                written = await self._collect_interval(instance, start, end)
+                written = await self._collect_interval(
+                    instance, start, end, watermark_at=last_done
+                )
                 total_samples += written
+                # The watermark only advances past an interval that completed.
+                # A partial failure raises out of this loop, leaving the
+                # watermark on the last whole interval so the next run retries
+                # rather than skipping the gap.
                 last_done = start
 
             watermark.watermark_at = last_done
@@ -127,14 +141,32 @@ class MetricCollector:
         return out
 
     async def _collect_interval(
-        self, instance: QRadarInstance, start: datetime, end: datetime
+        self,
+        instance: QRadarInstance,
+        start: datetime,
+        end: datetime,
+        *,
+        watermark_at: datetime | None = None,
     ) -> int:
+        started = self._clock()
         samples = await self.provider.get_log_source_metrics(start, end)
+        collected_at = self._clock()
+        duration_ms = int((collected_at - started).total_seconds() * 1000)
         if not samples:
             return 0
 
         # Map qradar_id -> internal LogSource id for this instance.
         id_map = await self._log_source_id_map(instance.id)
+
+        # Non-secret evidence of how these rows were produced. Never the token,
+        # never response headers — only the shape of the request.
+        provenance = {
+            "collector": COLLECTOR_NAME,
+            "window_start": start.isoformat(),
+            "window_end": end.isoformat(),
+            "provider": type(self.provider).__name__,
+            "sample_count": len(samples),
+        }
 
         rows = []
         for s in samples:
@@ -145,6 +177,12 @@ class MetricCollector:
                 {
                     "log_source_id": ls_id,
                     "bucket_start": start,
+                    "completeness": BucketCompleteness.COMPLETE,
+                    "collection_source": self._collection_source,
+                    "query_provenance": provenance,
+                    "collection_duration_ms": duration_ms,
+                    "collected_at": collected_at,
+                    "watermark_at": watermark_at,
                     "bucket_seconds": s.bucket_seconds,
                     "event_count": s.event_count,
                     "average_eps": s.average_eps,

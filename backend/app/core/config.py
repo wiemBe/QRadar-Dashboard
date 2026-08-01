@@ -38,6 +38,15 @@ LAB_PROFILE: dict[str, int] = {
     # One-minute buckets are the smallest interval the production validators
     # permit. Four samples and 1/2 hysteresis make a demonstration complete in
     # minutes while still requiring a baseline and an explicit recovery.
+    #
+    # This profile may only shorten *timing*: bucket interval, minimum sample
+    # count, confirmation count, recovery count, collection schedule. It must
+    # never contain a detection threshold. Lowering a threshold here would make
+    # the lab demonstrate a detector that production does not run, which is
+    # worse than no demonstration at all. The absolute-delta and ratio guards
+    # therefore keep their production values in LAB_MODE, and the documented
+    # 2 -> 6 EPS acceptance scenario clears them on merit (at 60s buckets that
+    # is 120 -> 360 events, a delta of 240 against a floor of 100).
     "collection_interval_seconds": 60,
     "baseline_min_samples": 4,
     "anomaly_open_after_intervals": 1,
@@ -230,6 +239,57 @@ class Settings(BaseSettings):
     anomaly_open_after_intervals: int = Field(default=2, ge=1)
     anomaly_resolve_after_intervals: int = Field(default=3, ge=1)
     anomaly_deviation_threshold: float = Field(default=3.5, ge=0.0)
+
+    # --- Phase A volume guards ----------------------------------------------
+    # Conjunctive with the robust z-score above, never a replacement for it:
+    # every guard added here can only make the detector more conservative.
+    #
+    # The absolute-delta and minimum-volume guards exist to kill the classic
+    # false positive where 0.2 EPS becomes 0.4 EPS — a clean 2x ratio and a
+    # large robust z-score on a change of no operational significance.
+    anomaly_spike_ratio: float = Field(default=2.0, gt=1.0)
+    anomaly_drop_ratio: float = Field(default=0.5, gt=0.0, lt=1.0)
+    #: Minimum |observed - expected|, in events per bucket, before a volume
+    #: verdict is defensible.
+    anomaly_min_absolute_delta_events: float = Field(default=100.0, ge=0.0)
+    #: A source must move at least this many events in the bucket for a spike,
+    #: or have expected at least this many for a drop, to be judged at all.
+    anomaly_min_bucket_events: float = Field(default=50.0, ge=0.0)
+    #: Bumped whenever detection semantics change. Recorded on every anomaly so
+    #: a historical verdict can be read against the rules that produced it.
+    anomaly_policy_version: int = Field(default=1, ge=1)
+    #: Buckets of expected-but-absent traffic tolerated before NO_EVENTS fires.
+    anomaly_silence_grace_buckets: int = Field(default=1, ge=0)
+
+    # --- Phase A explanation evidence ---------------------------------------
+    explanation_enabled: bool = True
+    #: Values retained per dimension. Bounds both the Ariel result and the
+    #: contributor rows written per package.
+    explanation_top_values: int = Field(default=20, ge=1, le=200)
+    #: Length of the recent-normal comparison window, as a multiple of the
+    #: anomaly window. Wider than 1x steadies a short anomaly's comparison.
+    explanation_baseline_window_multiple: float = Field(default=3.0, ge=1.0, le=24.0)
+    #: Hard ceiling on either explanation window. Ariel cost scales with the
+    #: window, and an unbounded investigation query can pin an appliance.
+    explanation_max_window_seconds: int = Field(default=6 * 3600, ge=60, le=168 * 3600)
+    #: Per-dimension Ariel timeout for an explanation job.
+    explanation_query_timeout_seconds: int = Field(default=120, ge=10, le=900)
+    #: Dimensions to compare, in priority order. Trimmed per source to those
+    #: the DSM actually populates; the rest are recorded UNAVAILABLE.
+    explanation_dimensions: list[str] = Field(
+        default_factory=lambda: [
+            "qid",
+            "event_name",
+            "source_ip",
+            "destination_ip",
+            "destination_port",
+            "source_port",
+            "username",
+            "action",
+            "category",
+            "protocol",
+        ]
+    )
 
     # --- Notifications ------------------------------------------------------
     notify_max_retries: int = Field(default=5, ge=0, le=20)

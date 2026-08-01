@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
@@ -23,7 +24,20 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import AnomalyType, Criticality, Severity
+from app.models.enums import (
+    AnomalyState,
+    AnomalyType,
+    BucketCompleteness,
+    Criticality,
+    EvidenceStatus,
+    Severity,
+)
+
+if TYPE_CHECKING:
+    # Runtime import would be circular: explanation.py maps back to
+    # LogSourceAnomaly. SQLAlchemy resolves the relationship by class name from
+    # the registry, so the annotation alone is enough.
+    from app.models.explanation import AnomalyExplanation
 
 
 class LogSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -144,7 +158,38 @@ class LogSourceMetric(Base):
     # detection across consecutive intervals.
     payload_signature: Mapped[str | None] = mapped_column(String(64))
 
+    # --- Phase A: provenance and completeness -------------------------------
+    # Whether the collector observed the whole interval. Only COMPLETE buckets
+    # enter a baseline or produce a verdict; a PARTIAL bucket displayed as a
+    # real observation would turn a collection outage into a false VOLUME_DROP
+    # across every source at once.
+    completeness: Mapped[BucketCompleteness] = mapped_column(
+        String(16), default=BucketCompleteness.COMPLETE, nullable=False
+    )
+    first_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Which subsystem produced this row, e.g. "ariel_aggregate" or "mock".
+    collection_source: Mapped[str | None] = mapped_column(String(32))
+    # Non-secret evidence of how the row was produced: AQL text, window bounds,
+    # row counts, truncation flags. Never credentials, tokens or headers.
+    query_provenance: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    collection_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Watermark in force when this bucket was written, so a later reader can
+    # tell whether the row predates a backfill correction.
+    watermark_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     log_source: Mapped[LogSource] = relationship(back_populates="metrics")
+
+    @property
+    def bucket_end(self) -> datetime:
+        """Exclusive upper bound of the half-open bucket [start, end)."""
+        return self.bucket_start + timedelta(seconds=self.bucket_seconds)
+
+    @property
+    def is_complete(self) -> bool:
+        # `==`, not `is`: these enum columns are String-typed, so a value loaded
+        # from the database is a plain str rather than the StrEnum member.
+        return self.completeness == BucketCompleteness.COMPLETE
 
 
 class LogSourceBaseline(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -192,7 +237,23 @@ class LogSourceBaseline(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     baseline_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     observations: Mapped[list[float]] = mapped_column(JSONB, default=list, nullable=False)
 
+    # --- Phase A ------------------------------------------------------------
+    # Fraction of candidate buckets in the lookback that survived exclusion and
+    # actually backed this cell, in [0, 1]. A cell built from 4 of 28 available
+    # buckets is far weaker than one built from 26, even when both clear the
+    # minimum sample count, and an operator needs to see the difference.
+    completeness: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # How many candidate buckets were dropped, and why, so an unexpectedly thin
+    # baseline is diagnosable without re-running the build.
+    excluded_sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    exclusion_counts: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
     log_source: Mapped[LogSource] = relationship(back_populates="baselines")
+
+    @property
+    def seasonality_key(self) -> str:
+        """Phase A seasonality: ISO weekday x hour of day (168 cells)."""
+        return f"w{self.weekday}h{self.hour:02d}"
 
 
 class LogSourceDetectorState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -223,6 +284,16 @@ class LogSourceDetectorState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_open: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_interval_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     open_anomaly_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
+
+    # Phase A explicit lifecycle. `is_open` is retained as the Phase 3 spelling
+    # of "an incident exists" and stays consistent with `state`, so existing
+    # alerting keeps working while the finer states drive the investigation UI.
+    state: Mapped[AnomalyState] = mapped_column(
+        String(24), default=AnomalyState.NORMAL, nullable=False
+    )
+    # Incident currently being tracked through CANDIDATE -> RESOLVED. Distinct
+    # from open_anomaly_id, which only exists once the incident is OPEN.
+    active_anomaly_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
 
 
 class LogSourceAnomaly(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -257,7 +328,82 @@ class LogSourceAnomaly(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     suppressed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     suppression_reason: Mapped[str | None] = mapped_column(String(255))
 
+    # --- Phase A lifecycle --------------------------------------------------
+    state: Mapped[AnomalyState] = mapped_column(
+        String(24), default=AnomalyState.CANDIDATE, nullable=False
+    )
+    # detected_at is when the engine first saw the deviation; opened_at is when
+    # it was promoted to an incident. They differ by the confirmation delay,
+    # and reporting mean-time-to-detect needs both.
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Bounds of the abnormal telemetry itself, which is what the explanation
+    # job queries. Distinct from detected_at/resolved_at, which are engine
+    # clock times.
+    anomaly_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    anomaly_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    confidence: Mapped[float | None] = mapped_column(Float)
+    # observed / expected. Stored alongside the robust score because the ratio
+    # is what an operator reasons about and the z-score is what fired.
+    deviation_ratio: Mapped[float | None] = mapped_column(Float)
+    robust_z: Mapped[float | None] = mapped_column(Float)
+    # Signed observed - expected, in metric units.
+    absolute_delta: Mapped[float | None] = mapped_column(Float)
+    consecutive_buckets: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Which baseline and which detection policy produced this verdict, so a
+    # later reader can tell whether it would still fire under current rules.
+    baseline_version: Mapped[int | None] = mapped_column(Integer)
+    policy_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    evidence_status: Mapped[EvidenceStatus] = mapped_column(
+        String(16), default=EvidenceStatus.NOT_REQUESTED, nullable=False
+    )
+
     log_source: Mapped[LogSource] = relationship(back_populates="anomalies")
+    transitions: Mapped[list[AnomalyStateTransition]] = relationship(
+        back_populates="anomaly",
+        cascade="all, delete-orphan",
+        order_by="AnomalyStateTransition.occurred_at",
+    )
+    # Named `explanation_package`, not `explanation`: the Text column above is
+    # the Phase 3 one-line detector reason and keeps that name.
+    explanation_package: Mapped[AnomalyExplanation | None] = relationship(
+        back_populates="anomaly", cascade="all, delete-orphan", uselist=False
+    )
 
     def __repr__(self) -> str:
-        return f"<LogSourceAnomaly {self.anomaly_type} severity={self.severity}>"
+        return f"<LogSourceAnomaly {self.anomaly_type} state={self.state}>"
+
+
+class AnomalyStateTransition(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Auditable record of one anomaly lifecycle transition.
+
+    Every state change is persisted rather than only the current state, because
+    "this incident flapped CANDIDATE/NORMAL six times before opening" is an
+    operator-visible fact about detector tuning that a single mutable column
+    destroys.
+    """
+
+    __tablename__ = "anomaly_state_transition"
+    __table_args__ = (
+        Index("ix_anomaly_transition_anomaly", "anomaly_id", "occurred_at"),
+    )
+
+    anomaly_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("log_source_anomaly.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    from_state: Mapped[AnomalyState | None] = mapped_column(String(24))
+    to_state: Mapped[AnomalyState] = mapped_column(String(24), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The metric bucket that drove the transition, when one did. Manual
+    # suppression has no triggering bucket.
+    bucket_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(64), default="anomaly-engine", nullable=False)
+    observed_value: Mapped[float | None] = mapped_column(Float)
+    expected_value: Mapped[float | None] = mapped_column(Float)
+
+    anomaly: Mapped[LogSourceAnomaly] = relationship(back_populates="transitions")

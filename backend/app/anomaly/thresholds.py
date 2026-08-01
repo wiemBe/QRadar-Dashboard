@@ -23,6 +23,17 @@ from app.models.enums import AnomalyType, Criticality
 class Thresholds:
     # deviation z-score magnitude to flag volume anomalies
     deviation_z: float = 3.5
+    # --- Phase A volume guards, all conjunctive with deviation_z ------------
+    # observed/expected must reach this to be a spike candidate
+    spike_ratio: float = 2.0
+    # observed/expected must fall to this to be a drop candidate
+    drop_ratio: float = 0.5
+    # |observed - expected| in events per bucket; kills the 0.2 -> 0.4 EPS case
+    min_absolute_delta_events: float = 100.0
+    # a source must be moving this many events/bucket to be judged at all
+    min_bucket_events: float = 50.0
+    # empty buckets tolerated before NO_EVENTS fires
+    silence_grace_buckets: int = 1
     # ratio floors/ceilings
     min_parsed_ratio: float = 0.5           # below -> PARSING_DEGRADATION
     max_unknown_ratio: float = 0.2          # above -> UNKNOWN_EVENT_SPIKE
@@ -77,8 +88,17 @@ class ThresholdResolver:
             resolve_after = _CRITICALITY_RESOLVE_AFTER.get(
                 criticality, self.settings.anomaly_resolve_after_intervals
             )
+        # The volume guards are NOT part of the LAB_MODE profile. LAB_MODE may
+        # shorten timing (bucket width, sample count, confirmation and recovery
+        # counts) but never lowers a detection threshold: a lab that shows a
+        # detector production does not run is worse than no lab at all.
         base = Thresholds(
             deviation_z=self.settings.anomaly_deviation_threshold,
+            spike_ratio=self.settings.anomaly_spike_ratio,
+            drop_ratio=self.settings.anomaly_drop_ratio,
+            min_absolute_delta_events=self.settings.anomaly_min_absolute_delta_events,
+            min_bucket_events=self.settings.anomaly_min_bucket_events,
+            silence_grace_buckets=self.settings.anomaly_silence_grace_buckets,
             open_after=open_after,
             resolve_after=resolve_after,
         )

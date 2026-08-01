@@ -31,6 +31,12 @@ class AnomalyEvidence:
     confidence: float
     reason: str
     extra: dict = field(default_factory=dict)
+    # True when the detector could not reach a verdict for want of usable data,
+    # as opposed to reaching a "not anomalous" verdict. Both carry the UNKNOWN
+    # signal so neither advances hysteresis, but only this one may surface as
+    # INSUFFICIENT_DATA — an operator must be able to tell "this source is fine"
+    # apart from "we cannot yet say whether this source is fine".
+    insufficient_data: bool = False
 
     @property
     def is_anomalous(self) -> bool:
@@ -96,3 +102,28 @@ def unknown(
         confidence=0.0,
         reason=reason,
     )
+
+
+def insufficient(
+    anomaly_type: AnomalyType,
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+    reason: str,
+    sample_count: int = 0,
+) -> AnomalyEvidence:
+    """No verdict is possible: the baseline or the bucket is inadequate.
+
+    Deliberately not `healthy()`. Returning "normal" because we could not
+    measure anything is the single most misleading thing a monitoring system can
+    do — it converts an observability gap into a false assurance.
+    """
+    ev = unknown(
+        anomaly_type,
+        interval_start=interval_start,
+        interval_end=interval_end,
+        reason=reason,
+    )
+    ev.insufficient_data = True
+    ev.sample_count = sample_count
+    return ev
