@@ -272,6 +272,12 @@ class Settings(BaseSettings):
     #: Hard ceiling on either explanation window. Ariel cost scales with the
     #: window, and an unbounded investigation query can pin an appliance.
     explanation_max_window_seconds: int = Field(default=6 * 3600, ge=60, le=168 * 3600)
+    #: Anomalies explained per task run. Bounds Ariel load: each anomaly costs
+    #: two queries per dimension, so a backlog is worked through over several
+    #: runs rather than in one burst against the appliance.
+    explanation_max_per_run: int = Field(default=5, ge=1, le=100)
+    #: How often the explanation task drains the pending queue.
+    explanation_collection_interval_seconds: int = Field(default=300, ge=30)
     #: Per-dimension Ariel timeout for an explanation job.
     explanation_query_timeout_seconds: int = Field(default=120, ge=10, le=900)
     #: Dimensions to compare, in priority order. Trimmed per source to those

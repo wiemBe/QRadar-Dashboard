@@ -25,7 +25,11 @@ from app.alerts.routing import default_policy
 from app.alerts.search_alerts import SearchAlertEvaluator
 from app.alerts.service import AlertInput, AlertService
 from app.anomaly.baseline import BaselineBuilder
-from app.anomaly.engine import AnomalyEngine
+from app.anomaly.engine import EXPLAINABLE_TYPES, AnomalyEngine
+from app.collectors.explanation_collector import (
+    EXPLANATION_COLLECTOR,
+    ExplanationCollector,
+)
 from app.collectors.log_source_collector import LogSourceCollector
 from app.collectors.metric_collector import MetricCollector
 from app.collectors.offense_collector import OffenseCollector
@@ -33,9 +37,9 @@ from app.collectors.rule_collector import RuleCollector
 from app.collectors.rule_metric_collector import RuleMetricCollector
 from app.core.config import get_settings
 from app.core.database import dispose_engine, get_sessionmaker
-from app.models.enums import Severity
+from app.models.enums import EvidenceStatus, Severity
 from app.models.instance import QRadarInstance
-from app.models.log_source import LogSource
+from app.models.log_source import LogSource, LogSourceAnomaly
 from app.models.monitoring import CollectionWatermark
 from app.providers.base import QRadarProvider
 from app.providers.factory import build_provider, build_provider_for_instance
@@ -432,6 +436,63 @@ async def evaluate_anomalies() -> dict:
         return {"sources": len(sources), "opened": opened, "resolved": resolved}
 
 
+# -------------------------------------------------------- anomaly explanation
+async def collect_anomaly_explanations(instance_name: str | None = None) -> dict:
+    """Build bounded evidence packages for anomalies awaiting explanation.
+
+    Runs separately from detection so an unresponsive appliance delays evidence
+    rather than delaying alerts, and holds a per-instance advisory lock so two
+    workers cannot both hammer Ariel with the same investigation queries.
+    """
+    settings = get_settings()
+    if not settings.explanation_enabled:
+        return {"status": "disabled", "instances": 0, "results": []}
+
+    async def run(
+        session: AsyncSession, instance: QRadarInstance, provider: QRadarProvider | None
+    ) -> dict:
+        assert provider is not None
+        async with CollectorAdvisoryLock(
+            session, settings, instance.id, EXPLANATION_COLLECTOR
+        ) as acquired:
+            if not acquired:
+                return {"status": "locked", "explained": 0}
+
+            pending = list(
+                (
+                    await session.scalars(
+                        select(LogSourceAnomaly)
+                        .join(LogSource, LogSource.id == LogSourceAnomaly.log_source_id)
+                        .where(
+                            LogSource.instance_id == instance.id,
+                            LogSourceAnomaly.evidence_status == EvidenceStatus.PENDING,
+                            LogSourceAnomaly.anomaly_type.in_(
+                                [t.value for t in EXPLAINABLE_TYPES]
+                            ),
+                        )
+                        # Oldest first: an anomaly whose window is about to age
+                        # out of Ariel retention is the one that cannot wait.
+                        .order_by(LogSourceAnomaly.detected_at)
+                        .limit(settings.explanation_max_per_run)
+                    )
+                ).all()
+            )
+
+            collector = ExplanationCollector(session, provider, settings=settings)
+            statuses: dict[str, int] = {}
+            for anomaly in pending:
+                report = await collector.collect(anomaly)
+                key = report.status.value
+                statuses[key] = statuses.get(key, 0) + 1
+            return {
+                "status": "ok",
+                "explained": len(pending),
+                "by_status": statuses,
+            }
+
+    return await _for_each_instance(run, instance_name)
+
+
 # ------------------------------------------------------------------ baselines
 async def rebuild_baselines() -> dict:
     maker = get_sessionmaker()
@@ -556,6 +617,11 @@ def evaluate_detection_coverage_task(instance_name: str | None = None) -> dict:
 @celery_app.task(name="evaluate_anomalies")
 def evaluate_anomalies_task() -> dict:
     return _run(evaluate_anomalies())
+
+
+@celery_app.task(name="collect_anomaly_explanations")
+def collect_anomaly_explanations_task(instance_name: str | None = None) -> dict:
+    return _run(collect_anomaly_explanations(instance_name))
 
 
 @celery_app.task(name="rebuild_baselines")

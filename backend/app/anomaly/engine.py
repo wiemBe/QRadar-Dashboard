@@ -362,12 +362,12 @@ class AnomalyEngine:
         state.state = target
 
         if target is AnomalyState.CANDIDATE:
-            anomaly = await self._create_incident(
+            created = await self._create_incident(
                 log_source, metric, evidence, in_maintenance
             )
-            state.active_anomaly_id = anomaly.id
+            state.active_anomaly_id = created.id
             await self._record_transition(
-                anomaly, previous, target, metric, decision.reason, evidence
+                created, previous, target, metric, decision.reason, evidence
             )
             report.candidates.append(evidence.anomaly_type.value)
             return

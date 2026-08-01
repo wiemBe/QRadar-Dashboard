@@ -58,6 +58,14 @@ celery_app.conf.beat_schedule = {
         "task": "rebuild_baselines",
         "schedule": 86400.0,
     },
+    "collect-anomaly-explanations": {
+        # Phase A investigation evidence. Deliberately decoupled from
+        # detection: each anomaly costs two bounded Ariel queries per
+        # dimension, so an unresponsive appliance must delay evidence rather
+        # than delay the alert that something is wrong.
+        "task": "collect_anomaly_explanations",
+        "schedule": float(settings.explanation_collection_interval_seconds),
+    },
     # --- Phase 3 -------------------------------------------------------------
     # Every interval below is configurable; none is a hardcoded production
     # cadence. Ordering matters: inventory feeds health, health feeds coverage,

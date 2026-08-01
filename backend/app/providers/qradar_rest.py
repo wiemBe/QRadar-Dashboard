@@ -24,9 +24,9 @@ import asyncio
 import logging
 import random
 import ssl
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -42,6 +42,8 @@ from app.providers.dto import (
     ArielSearchHandleDTO,
     ArielSearchResultsDTO,
     ArielSearchStatusDTO,
+    DimensionAggregate,
+    DimensionValueCount,
     InstanceInfoDTO,
     LogSourceDTO,
     LogSourceMetricSample,
@@ -458,6 +460,171 @@ class QRadarRestProvider(QRadarProvider):
                 )
             )
         return samples
+
+    # -------------------------------------------------- explanation evidence
+    #: Explanation dimension -> the Ariel field that carries it, plus an
+    #: optional companion field holding a human-readable label. Only fields
+    #: QRadar normalizes across DSMs are listed; anything absent from a source's
+    #: parser is reported UNAVAILABLE rather than guessed at.
+    _DIMENSION_FIELDS: ClassVar[dict[str, tuple[str, str | None]]] = {
+        "qid": ("qid", "QIDNAME(qid)"),
+        "event_name": ("QIDNAME(qid)", None),
+        "source_ip": ("sourceip", None),
+        "destination_ip": ("destinationip", None),
+        "destination_port": ("destinationport", None),
+        "source_port": ("sourceport", None),
+        "username": ("username", None),
+        "action": ("eventdirection", None),
+        "category": ("category", "CATEGORYNAME(category)"),
+        "protocol": ("protocolid", "PROTOCOLNAME(protocolid)"),
+    }
+
+    async def get_dimension_aggregates(
+        self,
+        *,
+        qradar_log_source_id: int,
+        window_start: datetime,
+        window_end: datetime,
+        dimensions: Sequence[str],
+        top_n: int,
+    ) -> list[DimensionAggregate]:
+        """One bounded aggregate Ariel query per requested dimension.
+
+        Each query is `GROUP BY <field> ORDER BY count DESC LIMIT top_n` over a
+        single log source and a bounded window. No raw events are retrieved and
+        nothing is stored beyond the aggregate counts.
+
+        A failure on one dimension is recorded on that dimension and does not
+        abort the others: a partial explanation is useful, and losing the whole
+        package because one DSM lacks `username` would be a poor trade.
+        """
+        self.require(ProviderCapability.AQL_EXECUTION)
+        start, end = self._bounded_window(window_start, window_end)
+        limit = max(1, min(top_n, self._page_size))
+
+        out: list[DimensionAggregate] = []
+        for dimension in dimensions:
+            mapping = self._DIMENSION_FIELDS.get(dimension)
+            if mapping is None:
+                out.append(
+                    DimensionAggregate(
+                        dimension=dimension,
+                        available=False,
+                        error="dimension is not mapped to a QRadar field",
+                    )
+                )
+                continue
+            out.append(
+                await self._aggregate_one_dimension(
+                    dimension=dimension,
+                    field=mapping[0],
+                    label_field=mapping[1],
+                    qradar_log_source_id=qradar_log_source_id,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                )
+            )
+        return out
+
+    def _bounded_window(
+        self, window_start: datetime, window_end: datetime
+    ) -> tuple[datetime, datetime]:
+        start = window_start if window_start.tzinfo else window_start.replace(tzinfo=UTC)
+        end = window_end if window_end.tzinfo else window_end.replace(tzinfo=UTC)
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
+        if end <= start:
+            raise ValueError("explanation window end must be after its start")
+        if (end - start).total_seconds() > 168 * 3600:
+            raise ValueError("explanation window exceeds the 168-hour safety bound")
+        return start, end
+
+    async def _aggregate_one_dimension(
+        self,
+        *,
+        dimension: str,
+        field: str,
+        label_field: str | None,
+        qradar_log_source_id: int,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> DimensionAggregate:
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        label_select = f', {label_field} AS "label"' if label_field else ""
+        # Only integer epochs and a fixed field whitelist are interpolated; no
+        # caller-supplied string reaches the query text.
+        aql = (
+            f'SELECT {field} AS "value", COUNT(*) AS "count"{label_select} '  # noqa: S608
+            "FROM events "
+            f"WHERE logsourceid = {int(qradar_log_source_id)} "
+            f"AND starttime >= {start_ms} AND starttime < {end_ms} "
+            f"GROUP BY {field} ORDER BY COUNT(*) DESC LIMIT {limit}"
+        )
+        try:
+            rows = await self._run_bounded_aggregate(aql, max_rows=limit)
+        except (ProviderError, ValueError) as exc:
+            # Sanitized: the class name and our own message only, never a
+            # provider response body that could carry payload or header data.
+            return DimensionAggregate(
+                dimension=dimension, available=True, query=aql,
+                error=f"{type(exc).__name__}: {exc}"[:400],
+            )
+
+        values: list[DimensionValueCount] = []
+        total = 0
+        for row in rows:
+            raw = row.get("value")
+            count = as_int(row.get("count"))
+            if raw is None or count is None or count < 0:
+                continue
+            label = row.get("label")
+            values.append(
+                DimensionValueCount(
+                    value=str(raw)[:255],
+                    count=count,
+                    label=str(label)[:255] if label not in (None, "") else None,
+                )
+            )
+            total += count
+
+        # No rows at all is the signature of a field this DSM never populates.
+        # Reporting it as "available with zero values" would assert we measured
+        # an absence we did not measure.
+        if not values:
+            return DimensionAggregate(
+                dimension=dimension, available=False, query=aql,
+                error="field is not populated for this log source",
+            )
+
+        return DimensionAggregate(
+            dimension=dimension,
+            available=True,
+            values=values,
+            distinct_count=len(values),
+            total_count=total,
+            truncated=len(values) >= limit,
+            query=aql,
+        )
+
+    async def _run_bounded_aggregate(self, aql: str, *, max_rows: int) -> list[dict]:
+        """Create, poll and fetch one aggregate search under a hard time bound."""
+        handle = await self.create_ariel_search(aql)
+        status: ArielSearchStatusDTO | None = None
+        for _ in range(120):
+            status = await self.get_ariel_search_status(handle.search_id)
+            if status.is_terminal:
+                break
+            await self._sleep(1.0)
+        else:
+            await self.cancel_ariel_search(handle.search_id)
+            raise ProviderUnavailableError("Ariel explanation search timed out")
+
+        if status is None or not status.is_success:
+            raise ProviderError("Ariel explanation search did not complete")
+        results = await self.get_ariel_search_results(handle.search_id, max_rows=max_rows)
+        return list(results.rows)
 
     # ------------------------------------------------------------- rules
     async def list_rules(self) -> list[AnalyticsRuleDTO]:

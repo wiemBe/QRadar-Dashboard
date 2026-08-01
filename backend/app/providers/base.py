@@ -17,6 +17,7 @@ checks scattered through services.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 
@@ -25,6 +26,7 @@ from app.providers.dto import (
     ArielSearchHandleDTO,
     ArielSearchResultsDTO,
     ArielSearchStatusDTO,
+    DimensionAggregate,
     InstanceInfoDTO,
     LogSourceDTO,
     LogSourceMetricSample,
@@ -113,6 +115,32 @@ class QRadarProvider(ABC):
         (Phase 3); the mock synthesizes them deterministically.
         """
         self.require(ProviderCapability.INVENTORY)
+        raise NotImplementedError
+
+    async def get_dimension_aggregates(
+        self,
+        *,
+        qradar_log_source_id: int,
+        window_start: datetime,
+        window_end: datetime,
+        dimensions: Sequence[str],
+        top_n: int,
+    ) -> list[DimensionAggregate]:
+        """Bounded per-dimension event counts for one log source and window.
+
+        The evidence primitive behind "what changed during the anomaly?". Each
+        dimension becomes one aggregate Ariel query grouped by that field, with
+        results capped at `top_n`.
+
+        Requires AQL_EXECUTION, so this never runs through MCP: Ariel is a POST
+        surface deliberately kept off the LLM-facing path.
+
+        Implementations must return an entry for every requested dimension,
+        marking the ones the source's DSM does not populate as
+        ``available=False`` rather than omitting them. Silence about a field is
+        indistinguishable from a measured zero, and only one of those is true.
+        """
+        self.require(ProviderCapability.AQL_EXECUTION)
         raise NotImplementedError
 
     @abstractmethod

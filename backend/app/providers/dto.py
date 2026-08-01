@@ -48,6 +48,41 @@ class LogSourceTypeDTO(ProviderDTO):
     name: str
 
 
+class DimensionValueCount(ProviderDTO):
+    """One value of one field, and how many events carried it in a window."""
+
+    value: str
+    count: int
+    #: Friendlier form where the backend supplies one (QID -> event name). Never
+    #: synthesized: a missing label stays None rather than becoming the raw
+    #: value dressed up as a name.
+    label: str | None = None
+
+
+class DimensionAggregate(ProviderDTO):
+    """Bounded aggregate over one explanation dimension for one window.
+
+    ``available=False`` means the field is not populated in this source's DSM
+    output. That is materially different from "the field exists and no events
+    carried a value", so the two must never collapse into an empty list.
+    """
+
+    dimension: str
+    available: bool = True
+    values: list[DimensionValueCount] = Field(default_factory=list)
+    #: Distinct values in the window. May exceed len(values) when the result was
+    #: capped, which is why it is measured separately rather than inferred.
+    distinct_count: int = 0
+    #: Total events in the window, across all values of this dimension.
+    total_count: int = 0
+    #: The configured value cap was hit, so `values` is a prefix of the truth.
+    truncated: bool = False
+    #: The AQL that produced this aggregate. Non-secret; recorded as provenance.
+    query: str | None = None
+    #: Sanitized failure reason when the aggregate could not be produced.
+    error: str | None = None
+
+
 class LogSourceMetricSample(ProviderDTO):
     """One log source's observed metrics over a single collection interval.
 

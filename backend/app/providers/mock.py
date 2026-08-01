@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import random
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 from app.providers.base import ProviderCapability, QRadarProvider
 from app.providers.dto import (
@@ -23,6 +25,8 @@ from app.providers.dto import (
     ArielSearchHandleDTO,
     ArielSearchResultsDTO,
     ArielSearchStatusDTO,
+    DimensionAggregate,
+    DimensionValueCount,
     InstanceInfoDTO,
     LogSourceDTO,
     LogSourceMetricSample,
@@ -147,6 +151,80 @@ class MockQRadarProvider(QRadarProvider):
             sample = self._build_sample(qid, window_start, bucket_seconds, base_eps, shape)
             samples.append(sample)
         return samples
+
+    #: Dimensions the mock "DSM" populates, and the value alphabet for each.
+    #: `username` and `category` are deliberately absent so tests exercise the
+    #: UNAVAILABLE path — a real firewall DSM populates neither.
+    _MOCK_DIMENSION_VALUES: ClassVar[dict[str, list[str]]] = {
+        "qid": ["1000001", "1000002", "1000003", "1000004"],
+        "event_name": ["Accept", "Deny", "Session Closed", "Session Opened"],
+        "source_ip": [
+            "203.0.113.50", "198.51.100.11", "192.0.2.77", "198.51.100.42", "192.0.2.8",
+        ],
+        "destination_ip": ["10.0.0.5", "10.0.0.9", "10.0.1.20", "10.0.2.31"],
+        "destination_port": ["445", "3389", "22", "443", "80"],
+        "source_port": ["49152", "49153", "49154"],
+        "action": ["DENY", "ACCEPT"],
+        "protocol": ["6", "17"],
+    }
+
+    async def get_dimension_aggregates(
+        self,
+        *,
+        qradar_log_source_id: int,
+        window_start: datetime,
+        window_end: datetime,
+        dimensions: Sequence[str],
+        top_n: int,
+    ) -> list[DimensionAggregate]:
+        """Deterministic bounded aggregates.
+
+        Counts are seeded from (log source, dimension, value, window start), so
+        two different windows produce genuinely different distributions while
+        any given window is exactly reproducible. That is what lets an
+        explanation test assert on contributor ranking rather than merely on
+        shape.
+        """
+        self.require(ProviderCapability.AQL_EXECUTION)
+        seconds = max(1.0, (window_end - window_start).total_seconds())
+        out: list[DimensionAggregate] = []
+
+        for dimension in dimensions:
+            alphabet = self._MOCK_DIMENSION_VALUES.get(dimension)
+            if alphabet is None:
+                out.append(
+                    DimensionAggregate(
+                        dimension=dimension,
+                        available=False,
+                        error="field is not populated for this log source",
+                    )
+                )
+                continue
+
+            rng = random.Random(  # noqa: S311 - deterministic fixture, not crypto
+                f"{qradar_log_source_id}:{dimension}:{int(window_start.timestamp())}"
+            )
+            counts: list[DimensionValueCount] = []
+            for value in alphabet:
+                # A dominant head plus a light tail, so a "top contributor" is a
+                # meaningful concept rather than a uniform draw.
+                weight = rng.random() ** 2
+                count = int(weight * seconds * 4) + 1
+                counts.append(DimensionValueCount(value=value, count=count))
+            counts.sort(key=lambda c: c.count, reverse=True)
+            capped = counts[:top_n]
+            out.append(
+                DimensionAggregate(
+                    dimension=dimension,
+                    available=True,
+                    values=capped,
+                    distinct_count=len(counts),
+                    total_count=sum(c.count for c in counts),
+                    truncated=len(counts) > top_n,
+                    query=f"MOCK GROUP BY {dimension} LIMIT {top_n}",
+                )
+            )
+        return out
 
     def _seasonal_eps(self, when: datetime, shape: str) -> float:
         # ISO weekday 1..7, hour 0..23.

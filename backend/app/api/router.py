@@ -18,6 +18,7 @@ from app.api.routes import (
     searches,
 )
 from app.security.rbac import (
+    PERM_ANOMALY_READ,
     PERM_COVERAGE_READ,
     PERM_OFFENSE_READ,
     PERM_PROVIDER_READ,
@@ -29,7 +30,6 @@ api_router.include_router(health.router)
 api_router.include_router(overview.router)
 api_router.include_router(log_sources.router)
 api_router.include_router(searches.router)
-api_router.include_router(anomalies.router)
 api_router.include_router(alerts.router)
 # --- Phase 3 ---
 # Guarded at the router. These endpoints expose offence records (parsed
@@ -45,4 +45,15 @@ api_router.include_router(
 )
 api_router.include_router(
     providers.router, dependencies=[Depends(requires(PERM_PROVIDER_READ))]
+)
+# --- Phase A ---
+# The behavioural anomaly and investigation surface. Guarded at the router for
+# the same reason as Phase 3: contributor evidence carries source addresses and,
+# where the DSM supplies them, usernames. The `read:*` wildcard satisfies it, so
+# existing read-only roles keep working.
+api_router.include_router(
+    anomalies.router, dependencies=[Depends(requires(PERM_ANOMALY_READ))]
+)
+api_router.include_router(
+    anomalies.behavior_router, dependencies=[Depends(requires(PERM_ANOMALY_READ))]
 )

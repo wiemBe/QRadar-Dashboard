@@ -46,6 +46,10 @@ PERM_OFFENSE_READ = "read:offenses"
 PERM_RULE_READ = "read:rules"
 PERM_COVERAGE_READ = "read:coverage"
 PERM_PROVIDER_READ = "read:providers"
+# Phase A. Behavioral anomalies expose contributor evidence (source and
+# destination addresses, usernames where the DSM supplies them), so the
+# investigation surface is guarded exactly like offences are.
+PERM_ANOMALY_READ = "read:anomalies"
 
 
 class PermissionDenied(Exception):
