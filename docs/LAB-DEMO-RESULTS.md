@@ -471,8 +471,116 @@ during a live run.
    burns a collection cycle and would matter under a tighter lag budget.
 3. **Contended watermark advancement** — see `docs/PHASE-A-SOURCE-VOLUME-ANOMALY.md` §11.1.
 
+## Multi-source isolation test (PASSED)
+
+Two additional log sources were created manually in the QRadar UI (never through REST) and verified
+read-only before use:
+
+| QRadar ID | Name | Identifier | Parser | Collector | Enabled |
+|---:|---|---|---|---:|---|
+| 227 | LAB Phase A Firewall | `lab-fw-volume-01` | Netgate pfSense | 7 | yes |
+| 262 | LAB Phase A Firewall 2 | `lab-fw-volume-02` | Netgate pfSense | 7 | yes |
+| 263 | LAB Phase A Firewall 3 | `lab-fw-volume-03` | Netgate pfSense | 7 | yes |
+
+Synchronized into the application through the normal Celery task (`sync_log_sources`, task
+`6f4a3b72…`): 49 seen, **2 created**, 47 updated.
+
+**Source-level overrides: none were added.** Source 227 keeps its existing `{"open_after": 2}`.
+Sources 262 and 263 were deliberately left on the global `open_after = 1`, because they are the
+control sources — a *lower* confirmation threshold makes the isolation claim stricter, since a
+false positive would surface a bucket sooner rather than later.
+
+Run ID `labrun-multi-20260802T203138Z`, scenario `multi-source-single-spike`, started on a clean
+minute boundary at **20:32:00Z**. **16,800 of 16,800 events sent, zero errors.** Peak combined rate
+25 EPS (15 + 5 + 5), below the 50 EPS limit.
+
+| Phase | Actual start | Actual end | Rates | Sent |
+|---|---|---|---|---:|
+| baseline | 20:32:00.465Z | 20:40:00.265Z | all three @ 5 EPS | 7,200 |
+| anomaly | 20:40:00.465Z | 20:44:00.399Z | **01 @ 15 EPS**, 02/03 @ 5 EPS | 6,000 |
+| recovery | 20:44:00.465Z | 20:48:00.265Z | all three @ 5 EPS | 3,600 |
+
+### Per-source result
+
+All 14 buckets `COMPLETE` for every source. Only source 227 departs from baseline:
+
+| Bucket | 227 | 262 | 263 |
+|---|---:|---:|---:|
+| 20:32–20:39Z (8 baseline) | 299–300 | 299–300 | 299–300 |
+| 20:40Z | **885** | 296 | 296 |
+| 20:41Z | **901** | 300 | 300 |
+| 20:42Z | **902** | 301 | 301 |
+| 20:43Z | **901** | 300 | 300 |
+| 20:44–20:45Z (recovery) | 311, 300 | 303, 300 | 303, 300 |
+
+| Source | Baseline median | MAD | Samples | Version | Expected EPS | Observed EPS | Ratio | Incidents |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 227 | 299 | 0 | 9 | 3 | 4.983 | **15.033** | **3.0167** | **1** |
+| 262 | 300 | 0 | 8 | 1 | 5.000 | 5.000 | 1.00 | **0** |
+| 263 | 300 | 0 | 8 | 1 | 5.000 | 5.000 | 1.00 | **0** |
+
+Detector states during the anomaly window: 227 `VOLUME_SPIKE` = **OPEN** (2 consecutive anomalous);
+262 and 263 `VOLUME_SPIKE` = **NORMAL** (0 anomalous, 2 healthy). Every other detector type on all
+three sources stayed `NORMAL`.
+
+### Lifecycle — source 227 only
+
+Incident `2f3a874c…`, `VOLUME_SPIKE`, MEDIUM. Observed 15.033 EPS vs expected 4.983, ratio 3.0167,
+absolute delta **603**, robust z 20.167 (zero-MAD fallback), confidence 0.441, baseline version 3.
+
+| From | To | Actual timestamp | Reason |
+|---|---|---|---|
+| `NORMAL` | `CANDIDATE` | 20:42:39.628Z | first abnormal bucket |
+| `CANDIDATE` | `OPEN` | 20:43:39.632Z | 2 consecutive abnormal bucket(s) reached the confirmation threshold of 2 |
+| `OPEN` | `RECOVERING` | 20:45:39.628Z | normal bucket observed |
+| `RECOVERING` | `RESOLVED` | 20:46:39.635Z | 2 consecutive normal bucket(s) reached the recovery threshold of 2 |
+
+Anomaly interval `20:41:00Z – 20:44:00Z`.
+
+### Evidence belongs to the changed source
+
+Explanation `61ec4980…` enqueued through Celery (`collect_anomaly_explanations`, task `1331f920…`)
+at 20:43:56Z, 17 s after OPEN; succeeded in 1.125 s. Status **PARTIAL**, baseline window
+`20:35–20:41Z`, anomaly window `20:41–20:43Z`.
+
+Ownership was verified structurally, not assumed: all **20** provenance AQL queries reference
+`logsourceid = 227` and no other source.
+
+Top contributors (AVAILABLE dimensions only):
+
+| Dimension | Value | Baseline | Anomaly | Delta | Contribution | Rank b→a |
+|---|---|---:|---:|---:|---:|---|
+| `destination_ip` | `10.10.10.20` | 388 | 1,407 | +1,019 | 0.986 | 1→1 |
+| `event_name` | `Firewall - Deny` | 349 | 1,364 | +1,015 | 0.993 | 2→1 |
+| `destination_port` | `445` | 319 | 1,331 | +1,012 | 0.967 | 1→1 |
+| `source_ip` | `203.0.113.50` | 311 | 1,319 | +1,008 | 0.962 | 1→1 |
+| `action` | `R2L` | 795 | 1,803 | +1,008 | 1.000 | 1→1 |
+
+`source_port` is **TRUNCATED** and `username` **UNAVAILABLE**, as in every prior run.
+
+### Two honest observations
+
+**1. An unopened candidate remains in state `NORMAL` with `resolved_at` NULL.** Incident
+`1f088461…` (`VOLUME_DROP`, source 227) was raised because source 227 was idle between the drop test
+and this one: the 20:18Z bucket held 3 events and no bucket exists for 20:19–20:31Z. Its trail is
+`NORMAL → CANDIDATE` (20:20:39Z, "first abnormal bucket") then `CANDIDATE → NORMAL` (20:34:39Z,
+"returned to normal before opening"). It never opened, so nothing was ever resolved and
+`resolved_at` is correctly NULL.
+
+This is an artifact of test sequencing, not a defect and not a duplicate incident from this run. It
+does mean **`resolved_at IS NULL` is the wrong test for "active"** — the product already uses state,
+and `/api/v1/anomalies/summary` correctly reports `open_anomalies: 0`, `candidates: 0`,
+`recovering: 0`.
+
+**2. Two incidents opened on QRadar's own internal log sources**, outside the lab set and before
+this run began: `System Notification-2` (`VOLUME_SPIKE`, 20:10Z) and `SIM Audit-2` (`VOLUME_SPIKE`,
+20:14Z), both since RESOLVED. These are genuine detections against real appliance telemetry whose
+volume actually varied — not false positives, and not from the lab generator. They do not bear on
+the isolation claim, which concerns 227 versus 262/263 inside the 20:32–20:48Z window.
+
+Across the whole database: 6 incidents, 5 RESOLVED and 1 NORMAL (the unopened candidate above), 20
+transitions, zero duplicate natural keys, zero non-COMPLETE buckets.
+
 ## Still outstanding
 
-Multi-source isolation (blocked: `lab-fw-volume-02` and `lab-fw-volume-03` do not exist as QRadar
-log sources and must be created manually in the QRadar UI), silence validation, `LAB_MODE` and
-source-override cleanup, and the final gate run.
+Silence validation, `LAB_MODE` and source-override cleanup, and the final gate run.
