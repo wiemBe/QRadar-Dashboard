@@ -313,8 +313,166 @@ Collection lag was **40–41 s after bucket end**, stable across the run. Metric
 52–62 ms. Watermark ended at 18:41:00Z with 39 s lag and zero consecutive failures. Zero task
 failures, retries, or tracebacks in the worker across the entire run. Zero duplicate natural keys.
 
-### Not yet done
+## Authenticated API and frontend verification (live)
 
-Multi-source isolation, drop, and silence scenarios; API and frontend live verification; and the
-`LAB_MODE` cleanup all remain outstanding. The authenticated API could not be exercised in this
-session because `app_user` is empty — no user was created, since that was outside the agreed scope.
+**Correction to an earlier note in this file:** an empty `app_user` table was *not* a blocker.
+`AppUser` has no references in application code outside its model definition; it is not the
+authentication path. Requests resolve through `app/security/auth.py::get_principal`, and with
+`AUTH_PROVIDER=local` in a non-production environment:
+
+- no bearer token → admin principal (`admin:*`);
+- any bearer token → read-only principal (`read:*`), which satisfies `read:anomalies` through the
+  wildcard rule in `app/security/rbac.py`.
+
+No user was created, no row inserted, no permission weakened, and OIDC was left untouched (it still
+returns 501). Verification used the **bearer** path deliberately, because it is the more restrictive
+principal and matches the least privilege needed to read Phase A data.
+
+Lab-only command — no setup step is required:
+
+```
+curl -H "Authorization: Bearer lab-readonly" http://127.0.0.1:8000/api/v1/anomalies
+```
+
+| Endpoint | Result |
+|---|---|
+| `GET /api/v1/anomalies` | 200, one live item |
+| `GET /api/v1/anomalies/summary` | 200, incident under `recently_resolved`; 57 monitored, 53 insufficient-data |
+| `GET /api/v1/anomalies/{id}` | 200, full detection + explanation package |
+| `GET /api/v1/behavior/sources` | 200, 57 sources including 227 |
+| `GET /api/v1/behavior/sources/{uuid}` | 200, observed 1.983 / expected 1.983, band [1.983, 1.983], NORMAL, 8 samples |
+
+`GET /api/v1/behavior/sources/227` returns **422**: the route takes the internal UUID, not the
+QRadar ID. That is the route contract, not a defect.
+
+The detail response carries `robust_score_status: "DEGENERATE"` and the reason string *"robust score
+unavailable (MAD=0)"*, and its query provenance exposes the live AQL including the `START/STOP`
+scoping from `dc9aa34`, per-query row counts, per-query truncation flags, and the username error.
+
+Frontend routes `/behavior`, `/behavior/sources/{uuid}`, `/anomalies` and `/anomalies/{id}` all
+return 200 and render the live values — source name, `VOLUME_SPIKE`, `RESOLVED`, 5.98 / 1.98, ratio
+3.02, delta 240, `PARTIAL`, the four contributor values, `R2L`, `UNAVAILABLE`, `TRUNCATED`, `MAD=0`,
+`DEGENERATE`, and all four transition reasons. No fixture was used as proof.
+
+### Truncated evidence is no longer presented as a finding
+
+`DimensionSummary` and `ContributorTable` used one flag for two different questions, so the live
+`source_port` dimension rendered a definitive **"20 new, 20 disappeared"**. Under a value cap those
+counts are an artifact: a value looks new only because it fell below the cap in the other window.
+
+The evidence model already distinguished `AVAILABLE` / `TRUNCATED` / `UNAVAILABLE` / `FAILED`, so no
+schema or API change was needed — the defect was presentation only. Fixed in `404bc39` by splitting
+`contributorsAreShowable` (AVAILABLE + TRUNCATED) from `newAndDisappearedAreDeterminate` (AVAILABLE
+only). Contributor rows still render for a truncated dimension, because those rows are genuinely
+observed; only the counts are withheld. Four regression tests were added, two of which fail without
+the component change.
+
+## Drop test — baseline / drop / recovery (PASSED)
+
+Run ID `labrun-drop-20260802T200126Z`, scenario `baseline-drop-recovery`, source 227
+(`lab-fw-volume-01`), pfSense, UDP/514. Started on a clean minute boundary at **20:02:00Z** so the
+whole run fell inside the weekday-7 / hour-20 seasonal cell, leaving the hour-18 Acceptance Test 1
+cell untouched.
+
+Sanitized parameters: `--baseline-eps 5 --baseline-duration 480 --anomaly-eps 1 --anomaly-duration
+240 --recovery-duration 240`. **3,840 of 3,840 events sent, zero errors.**
+
+| Phase | EPS | Actual start | Actual end | Sent |
+|---|---:|---|---|---:|
+| baseline | 5 | 20:02:00.986Z | 20:10:00.786Z | 2,400 |
+| drop | 1 | 20:10:00.986Z | 20:13:59.986Z | 240 |
+| recovery | 5 | 20:14:00.986Z | 20:18:00.786Z | 1,200 |
+
+15 buckets, **every one `COMPLETE`**; 8 baseline at 299 events (20:02 at 296, first partial second),
+4 drop at 63/60/60/60, and recovery back to 296/299/299.
+
+Baseline rebuilt through Celery (`rebuild_baselines`, task `2630249a…`) at 20:11:04Z:
+
+| Cell | Metric | Median | MAD | Samples | Reliable | Version |
+|---|---|---:|---:|---:|---|---:|
+| wd 7 / hr 20 | `average_eps` | 4.9833 | **0** | 8 | yes | 1 |
+| wd 7 / hr 20 | `event_count` | 299 | **0** | 8 | yes | 1 |
+| wd 7 / hr 18 | `average_eps` | 1.9833 | 0 | 9 | yes | 2 |
+
+The hour-18 median is unchanged at 1.9833 / 119 after the rebuild, confirming that the Acceptance
+Test 1 anomaly buckets were excluded rather than folded into the baseline.
+
+### Detection and lifecycle
+
+| Field | Value |
+|---|---|
+| Detector | `VOLUME_DROP` |
+| Severity | HIGH |
+| Expected EPS | 4.983 |
+| Observed EPS | 1.0 |
+| Ratio | 0.2007 (threshold 0.5) |
+| Absolute delta | −239 (min magnitude 100) |
+| Robust z | −7.993 (zero-MAD fallback) |
+| Confidence | 0.457 |
+| Baseline / policy version | 1 / 1 |
+
+| From | To | Actual timestamp | Reason |
+|---|---|---|---|
+| `INSUFFICIENT_DATA` | `CANDIDATE` | 20:12:39.616Z | first abnormal bucket |
+| `CANDIDATE` | `OPEN` | 20:14:39.657Z | 2 consecutive abnormal bucket(s) reached the confirmation threshold of 2 |
+| `OPEN` | `RECOVERING` | 20:16:39.608Z | normal bucket observed |
+| `RECOVERING` | `RESOLVED` | 20:17:39.613Z | 2 consecutive normal bucket(s) reached the recovery threshold of 2 |
+
+Anomaly interval `20:11:00Z – 20:15:00Z`. **Two incidents total on source 227** (the preserved spike
+and this drop), **zero active**, no duplicate. The Acceptance Test 1 incident, its transitions and
+its evidence are intact.
+
+### Reduced and disappeared contributors
+
+Explanation enqueued through Celery (`collect_anomaly_explanations`, task `96b3d410…`) at 20:14:47Z,
+8 s after OPEN; succeeded in 1.260 s. Status **PARTIAL**, baseline window `20:02–20:11Z`, anomaly
+window `20:11–20:14Z`, no error.
+
+Reported only where the dimension is `AVAILABLE`:
+
+| Dimension | Value | Baseline | Anomaly | Delta | % delta | Disappeared |
+|---|---|---:|---:|---:|---:|---|
+| `event_name` | `Firewall - Permit` | 631 | 180 | −451 | −71% | no |
+| `destination_ip` | `10.10.10.20` | 278 | 0 | −278 | −100% | **yes** |
+| `destination_ip` | `10.10.10.22` | 265 | 0 | −265 | −100% | **yes** |
+| `event_name` | `Firewall - Deny` | 189 | 0 | −189 | −100% | **yes** |
+| `destination_port` | `22` | 162 | 0 | −162 | −100% | **yes** |
+| `source_ip` | `203.0.113.50` | 161 | 0 | −161 | −100% | **yes** |
+| `destination_port` | `445` | 161 | 0 | −161 | −100% | **yes** |
+
+Cardinality collapse in AVAILABLE dimensions: `destination_port` 5 → 1, `source_ip` 5 → 2,
+`destination_ip` 3 → 1, `event_name` / `qid` / `category` 2 → 1. Concentration rose to 1.000 for
+every collapsed dimension.
+
+`source_port` is **TRUNCATED** (20/20 under the cap) and its 20 new / 20 disappeared counts are
+**not** treated as disappearance evidence. `username` remains **UNAVAILABLE** with the reason *field
+is not populated for this log source*.
+
+### Lag and health
+
+Ingestion sub-minute. Collection lag a steady **40–41 s after bucket end** for all 15 buckets. Zero
+duplicate natural keys, zero non-COMPLETE buckets, final watermark 20:17:00Z at 39 s lag with zero
+consecutive failures.
+
+**One task failure occurred**, at 20:00:39Z — before the run started at 20:02:00Z:
+`collect_metrics` raised `MissingGreenlet` ("greenlet_spawn has not been called"), an intermittent
+connection-pool ping outside greenlet context. It has occurred 3 times in the retained log buffer.
+It cost no data here: the watermark only advances on success, so the interval was re-collected on
+the next cycle, and all 15 run buckets are present. Recorded as a follow-up below rather than fixed
+during a live run.
+
+## Follow-ups recorded, not addressed
+
+1. **Local-auth principal asymmetry.** In development local-auth mode, *no* bearer token yields an
+   `admin:*` principal while an arbitrary bearer value yields `read:*` — so an unauthenticated
+   caller is more privileged than a token-bearing one. This is refused when `is_production` is true
+   and did not affect validation, but it must be reviewed before any non-development deployment.
+2. **`MissingGreenlet` in `collect_metrics`.** Intermittent; self-heals via the watermark, but it
+   burns a collection cycle and would matter under a tighter lag budget.
+3. **Contended watermark advancement** — see `docs/PHASE-A-SOURCE-VOLUME-ANOMALY.md` §11.1.
+
+## Still outstanding
+
+Multi-source isolation (blocked: `lab-fw-volume-02` and `lab-fw-volume-03` do not exist as QRadar
+log sources and must be created manually in the QRadar UI), silence validation, `LAB_MODE` and
+source-override cleanup, and the final gate run.
