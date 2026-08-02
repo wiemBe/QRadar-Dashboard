@@ -90,6 +90,38 @@ class TestLogSourceMetrics:
         assert sample.stored_event_count == 300
 
     @pytest.mark.asyncio
+    async def test_metric_query_scopes_the_ariel_search_window(self) -> None:
+        """The AQL must carry START/STOP, not only a WHERE on starttime.
+
+        Without an explicit search window QRadar scopes the search to a recent
+        default range and intersects it with the WHERE clause, so a bucket older
+        than that default returns zero rows -- which the collector cannot
+        distinguish from a log source that genuinely fell silent.
+        """
+        captured_query = ""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal captured_query
+            if request.method == "POST" and request.url.path.endswith("/ariel/searches"):
+                captured_query = request.url.params["query_expression"]
+                return httpx.Response(201, json={"search_id": "metric-1", "status": "WAIT"})
+            if request.url.path.endswith("/ariel/searches/metric-1/results"):
+                return httpx.Response(200, json={"events": []})
+            if request.url.path.endswith("/ariel/searches/metric-1"):
+                return httpx.Response(200, json={"status": "COMPLETED", "progress": 100})
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        provider, _ = build_provider(handler, page_size=10, max_pages=2)
+        start = datetime(2026, 7, 31, 10, 0, tzinfo=UTC)
+        end = datetime(2026, 7, 31, 10, 5, tzinfo=UTC)
+
+        await provider.get_log_source_metrics(start, end)
+
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        assert f"START {start_ms} STOP {end_ms}" in captured_query
+
+    @pytest.mark.asyncio
     async def test_rejects_unbounded_metric_window_before_io(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise AssertionError(f"unexpected request: {request.url}")
@@ -1015,6 +1047,55 @@ class TestArielLifecycle:
         with pytest.raises(ProviderUnavailableError):
             await provider.cancel_ariel_search("s1")
         assert calls == 3
+
+
+# ------------------------------------------------------- contributor evidence
+class TestDimensionAggregates:
+    """The explanation path shares the metric path's search-window hazard.
+
+    Contributor evidence is always collected for an interval that has already
+    passed, so an unscoped search would return an empty aggregate for every
+    dimension and the anomaly would be reported as unexplained rather than
+    unavailable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dimension_query_scopes_the_ariel_search_window(self) -> None:
+        captured: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path.endswith("/ariel/searches"):
+                captured.append(request.url.params["query_expression"])
+                return httpx.Response(201, json={"search_id": "dim-1", "status": "WAIT"})
+            if request.url.path.endswith("/ariel/searches/dim-1/results"):
+                return httpx.Response(
+                    200, json={"events": [{"value": "203.0.113.50", "count": "6"}]}
+                )
+            if request.url.path.endswith("/ariel/searches/dim-1"):
+                return httpx.Response(200, json={"status": "COMPLETED", "progress": 100})
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        provider, _ = build_provider(handler, page_size=10, max_pages=2)
+        start = datetime(2026, 8, 2, 13, 8, tzinfo=UTC)
+        end = datetime(2026, 8, 2, 13, 12, tzinfo=UTC)
+
+        aggregates = await provider.get_dimension_aggregates(
+            qradar_log_source_id=227,
+            window_start=start,
+            window_end=end,
+            dimensions=["source_ip"],
+            top_n=5,
+        )
+
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        assert captured, "no Ariel search was created"
+        for query in captured:
+            assert f"START {start_ms} STOP {end_ms}" in query
+            # START/STOP scopes the search; the WHERE clause stays authoritative
+            # for the half-open interval bound.
+            assert f"starttime >= {start_ms} AND starttime < {end_ms}" in query
+        assert [a.dimension for a in aggregates] == ["source_ip"]
 
 
 # A throwaway self-signed certificate, used only to prove a CA bundle path is

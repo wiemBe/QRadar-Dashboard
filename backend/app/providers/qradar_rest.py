@@ -413,7 +413,13 @@ class QRadarRestProvider(QRadarProvider):
             'SELECT logsourceid AS "qradar_id", COUNT(*) AS "event_count", '  # noqa: S608 - integer epochs only
             'MAX(starttime) AS "last_event_time" FROM events '
             f"WHERE starttime >= {start_ms} AND starttime < {end_ms} "
-            "GROUP BY logsourceid"
+            "GROUP BY logsourceid "
+            # START/STOP scopes the Ariel search itself. Without it QRadar
+            # defaults the search to a recent window and intersects that with
+            # the WHERE clause, so any bucket older than the default silently
+            # returns zero rows -- indistinguishable from real silence. The
+            # WHERE clause stays authoritative for the half-open bucket bound.
+            f"START {start_ms} STOP {end_ms}"
         )
         handle = await self.create_ariel_search(aql)
         status: ArielSearchStatusDTO | None = None
@@ -560,7 +566,11 @@ class QRadarRestProvider(QRadarProvider):
             "FROM events "
             f"WHERE logsourceid = {int(qradar_log_source_id)} "
             f"AND starttime >= {start_ms} AND starttime < {end_ms} "
-            f"GROUP BY {field} ORDER BY COUNT(*) DESC LIMIT {limit}"
+            f"GROUP BY {field} ORDER BY COUNT(*) DESC LIMIT {limit} "
+            # See get_log_source_metrics: without START/STOP the search falls
+            # back to a recent default window, so contributor evidence for any
+            # past anomaly interval would come back empty rather than absent.
+            f"START {start_ms} STOP {end_ms}"
         )
         try:
             rows = await self._run_bounded_aggregate(aql, max_rows=limit)
