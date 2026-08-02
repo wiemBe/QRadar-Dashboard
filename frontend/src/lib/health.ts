@@ -98,3 +98,25 @@ export function formatDateTime(value: string | null | undefined): string {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
 }
+
+/**
+ * A timestamp for a dense table column.
+ *
+ * The locale default renders "8/3/2026, 12:55:00 AM", which wraps to three
+ * lines in a narrow column and makes the column the widest thing in the table.
+ * This drops the year and the seconds and uses a 24-hour clock, so the value
+ * stays on one line. It is for table cells only: anywhere the exact instant
+ * matters, `formatDateTime` remains the right function.
+ */
+export function formatDateTimeCompact(value: string | null | undefined): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString(undefined, {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}

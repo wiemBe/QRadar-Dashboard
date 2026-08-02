@@ -3,15 +3,23 @@
 // Deliberately distinguishes three outcomes that a naive list collapses into
 // one blank table: no anomalies exist, no anomalies match these filters, and
 // the request failed. Only the first is good news.
+//
+// Nine default columns, down from eleven. Absolute delta, duration,
+// confidence, the end and resolved timestamps and both version numbers moved
+// into a per-row disclosure — they were widening the table past the viewport
+// at 1024 px, where the Started column was clipped mid-word and Evidence and
+// the detail link were off-screen entirely.
 
 import type { Metadata } from "next";
 
 import { AnomalyFilters } from "@/components/behavior/AnomalyFilters";
+import { AnomalyRows } from "@/components/behavior/AnomalyRows";
 import { Pagination } from "@/components/Pagination";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { TableScroll } from "@/components/ui/TableScroll";
 import {
   ApiError,
   api,
-  sevTone,
   type AnomalySummary,
   type Page,
   type SourceBehavior,
@@ -21,14 +29,6 @@ import {
   paginationParams,
   parseAnomalyQuery,
 } from "@/lib/anomalyQuery";
-import {
-  evidenceTone,
-  formatDuration,
-  formatMetric,
-  formatRatio,
-  stateTone,
-} from "@/lib/behavior";
-import { formatDateTime } from "@/lib/health";
 
 export const metadata: Metadata = {
   title: "Anomalies",
@@ -88,12 +88,10 @@ export default async function AnomaliesPage({
 
   return (
     <>
-      <h2>Anomalies</h2>
-      <p className="subtitle">
-        Every detected behavioral deviation, with the observed and expected
-        values that produced the verdict. Open one to see what changed during the
-        anomalous interval.
-      </p>
+      <PageHeader
+        title="Anomalies"
+        description="Every detected behavioral deviation, with the observed and expected values that produced the verdict. Open one to see what changed during the anomalous interval."
+      />
 
       <AnomalyFilters
         values={{
@@ -123,62 +121,30 @@ export default async function AnomaliesPage({
         </div>
       ) : (
         <>
-          <table>
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th>Detector</th>
-                <th>State</th>
-                <th>Severity</th>
-                <th>Observed</th>
-                <th>Expected</th>
-                <th>Deviation</th>
-                <th>Started</th>
-                <th>Duration</th>
-                <th>Evidence</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((a) => (
-                <tr key={a.id}>
-                  <td>
-                    <a href={`/behavior/sources/${a.log_source_id}`}>
-                      {a.log_source_name ?? a.log_source_id}
-                    </a>
-                  </td>
-                  <td>{a.anomaly_type}</td>
-                  <td>
-                    <span className={`pill ${stateTone(a.state)}`}>{a.state}</span>
-                  </td>
-                  <td>
-                    <span className={`pill ${sevTone(a.severity)}`}>{a.severity}</span>
-                  </td>
-                  <td>{formatMetric(a.observed_value)}</td>
-                  <td>{formatMetric(a.expected_value)}</td>
-                  <td>{formatRatio(a.deviation_ratio)}</td>
-                  <td>{formatDateTime(a.anomaly_start ?? a.detected_at)}</td>
-                  {/* Null while still running. Not "0s", and not "now minus
-                      start", which would grow on every refresh. */}
-                  <td>
-                    {a.duration_seconds != null ? (
-                      formatDuration(a.duration_seconds)
-                    ) : (
-                      <span className="muted">running</span>
-                    )}
-                  </td>
-                  <td>
-                    <span className={`pill ${evidenceTone(a.evidence_status)}`}>
-                      {a.evidence_status}
-                    </span>
-                  </td>
-                  <td>
-                    <a href={`/anomalies/${a.id}`}>Investigate</a>
-                  </td>
+          <TableScroll label="Detected anomalies">
+            <table className="sticky-actions">
+              <caption className="sr-only">
+                Detected anomalies with lifecycle state, observed against
+                expected volume, deviation, severity and evidence status.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Source</th>
+                  <th scope="col">Detector</th>
+                  <th scope="col">State</th>
+                  <th scope="col">Observed → Expected</th>
+                  <th scope="col">Deviation</th>
+                  <th scope="col">Severity</th>
+                  <th scope="col">Started</th>
+                  <th scope="col">Evidence</th>
+                  <th scope="col">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <AnomalyRows items={items} />
+            </table>
+          </TableScroll>
 
           <Pagination
             total={page?.total ?? 0}

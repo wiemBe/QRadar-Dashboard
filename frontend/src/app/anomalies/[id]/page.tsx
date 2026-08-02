@@ -1,28 +1,41 @@
-// Anomaly investigation detail.
+// Anomaly investigation — the product's flagship page.
 //
-// The page answers one question: what changed during the anomalous interval?
-// Everything on it is server-rendered from the backend's own verdict — the UI
-// never recomputes detection logic, and never fills a missing measurement with
+// It answers one question: what changed, when, and what evidence supports it?
+// Everything on it is server-rendered from the backend's own verdict. The UI
+// never recomputes detection logic and never fills a missing measurement with
 // a plausible number.
+//
+// The information order is deliberate and is the whole redesign. Previously
+// the first viewport held eight equally weighted metric cards — including the
+// robust z-score — then a versions table, then a fourteen-row threshold table,
+// and the timeline appeared below all of it. Ten contributor tables and a
+// twenty-row provenance dump with expanded AQL followed: 26 tables and 125
+// column headers in one scroll.
+//
+// Now: who and what, the deterministic summary, four metrics, the timeline,
+// the three strongest contributors, and everything else behind three tabs.
 
 import type { Metadata } from "next";
 
-import { ContributorTable } from "@/components/behavior/ContributorTable";
-import { DetectionSummary } from "@/components/behavior/DetectionSummary";
-import { DimensionSummary } from "@/components/behavior/DimensionSummary";
-import { EvidenceStatusPanel } from "@/components/behavior/EvidenceStatusPanel";
-import { LifecycleHistory } from "@/components/behavior/LifecycleHistory";
-import { QueryProvenance } from "@/components/behavior/QueryProvenance";
+import { EvidenceBanner } from "@/components/behavior/EvidenceBanner";
+import { DimensionExplorer } from "@/components/behavior/DimensionExplorer";
+import { IncidentHeader } from "@/components/behavior/IncidentHeader";
+import { LifecycleTimeline } from "@/components/behavior/LifecycleTimeline";
+import { TechnicalDetails } from "@/components/behavior/TechnicalDetails";
+import { TopContributors } from "@/components/behavior/TopContributors";
 import { VolumeChart } from "@/components/behavior/VolumeChart";
-import { ApiError, api, sevTone, type AnomalyDetail, type MetricBucket } from "@/lib/api";
+import { AnomalyTabs } from "@/components/behavior/AnomalyTabs";
+import { ApiError, api, type AnomalyDetail, type MetricBucket } from "@/lib/api";
 import {
+  dimensionLabel,
   formatDuration,
   formatMetric,
   formatRatio,
+  hasConfidenceLimitation,
   stateMeaning,
-  stateTone,
 } from "@/lib/behavior";
-import { formatDateTime } from "@/lib/health";
+import { summarizeAnomaly, summarizeTimeline } from "@/lib/summarize";
+import { buildSeries } from "@/lib/timeseries";
 
 export const metadata: Metadata = {
   title: "Anomaly investigation",
@@ -49,7 +62,7 @@ export default async function AnomalyDetailPage({
   if (!anomaly) {
     return (
       <>
-        <h2>Anomaly investigation</h2>
+        <h1 className="page-title">Anomaly investigation</h1>
         <div className="notice" role="alert">
           {status === 404
             ? "This anomaly does not exist."
@@ -77,7 +90,7 @@ export default async function AnomalyDetailPage({
   ).toISOString();
 
   // A failed metric fetch must not take down the whole investigation: the
-  // detection summary, lifecycle and evidence are the substance of the page.
+  // summary, the metrics, the evidence and the lifecycle are the substance.
   let buckets: MetricBucket[] = [];
   let bucketsFailed = false;
   try {
@@ -88,107 +101,81 @@ export default async function AnomalyDetailPage({
 
   const pkg = anomaly.explanation_package;
   const detection = anomaly.detection;
+  const summary = summarizeAnomaly(anomaly);
+  const degenerate = hasConfidenceLimitation(detection?.robust_score_status);
+
+  const points = buildSeries(buckets);
+  const incomplete = buckets.filter((b) => b.completeness !== "COMPLETE").length;
+  const chartSummary = summarizeTimeline({
+    observed: points.map((p) => p.observed),
+    expected: detection?.expected_eps ?? anomaly.expected_value,
+    anomalyStart: anomaly.anomaly_start,
+    anomalyEnd: anomaly.anomaly_end,
+    state: anomaly.state,
+    incompleteBuckets: incomplete,
+    totalBuckets: buckets.length,
+  });
+
+  const truncated = (pkg?.dimensions ?? [])
+    .filter((d) => d.availability === "TRUNCATED")
+    .map((d) => dimensionLabel(d.dimension));
 
   return (
     <>
-      <h2>
-        {anomaly.log_source_name ?? "Unknown source"} · {anomaly.anomaly_type}
-      </h2>
-      <p className="subtitle">
-        <span className={`pill ${stateTone(anomaly.state)}`}>{anomaly.state}</span>{" "}
-        <span className={`pill ${sevTone(anomaly.severity)}`}>{anomaly.severity}</span>{" "}
-        {anomaly.suppressed && <span className="pill warn">suppressed</span>}{" "}
-        <a href={`/behavior/sources/${anomaly.log_source_id}`}>view source behavior</a>
-      </p>
+      {/* --- A. compact incident header ---------------------------------- */}
+      <IncidentHeader anomaly={anomaly} />
+
+      {/* --- B. deterministic summary ------------------------------------ */}
+      <p className="incident-summary">{summary.text}</p>
+      {summary.caveat && <p className="subtitle">{summary.caveat}</p>}
       <p className="subtitle">{stateMeaning(anomaly.state)}</p>
 
-      {anomaly.explanation && <p>{anomaly.explanation}</p>}
-
-      {/* --- header facts ------------------------------------------------ */}
-      <div className="grid">
+      {/* --- C. four primary metrics ------------------------------------- */}
+      <div className="grid-4">
         <div className="card">
           <div className="k">Observed</div>
           <div className="v">{formatMetric(anomaly.observed_value)}</div>
+          <p className="metric-note">EPS during the anomalous interval</p>
         </div>
         <div className="card">
           <div className="k">Expected</div>
           <div className="v">{formatMetric(anomaly.expected_value)}</div>
+          <p className="metric-note">Seasonal baseline for this weekday and hour</p>
         </div>
         <div className="card">
           <div className="k">Deviation</div>
           <div className="v">{formatRatio(anomaly.deviation_ratio)}</div>
-        </div>
-        <div className="card">
-          <div className="k">Absolute delta</div>
-          <div className="v">{formatMetric(anomaly.absolute_delta, 0)}</div>
-        </div>
-        <div className="card">
-          <div className="k">Robust z</div>
-          <div className="v">{formatMetric(anomaly.robust_z)}</div>
-        </div>
-        <div className="card">
-          <div className="k">Confidence</div>
-          <div className="v">{formatMetric(anomaly.confidence)}</div>
+          <p className="metric-note">Observed against expected</p>
         </div>
         <div className="card">
           <div className="k">Duration</div>
           <div className="v">{formatDuration(anomaly.duration_seconds)}</div>
-        </div>
-        <div className="card">
-          <div className="k">Evidence</div>
-          <div className="v">{anomaly.evidence_status}</div>
+          <p className="metric-note">
+            {anomaly.anomaly_end ? "Interval length" : "Still running"}
+          </p>
         </div>
       </div>
 
-      <table style={{ maxWidth: 760, marginTop: 20 }}>
-        <tbody>
-          <tr>
-            <td className="muted">Anomaly start</td>
-            <td>{formatDateTime(anomaly.anomaly_start)}</td>
-            <td className="muted">Anomaly end</td>
-            {/* Still running: no end exists, and inventing one would report a
-                closed incident that is still open. */}
-            <td>
-              {anomaly.anomaly_end ? (
-                formatDateTime(anomaly.anomaly_end)
-              ) : (
-                <span className="muted">still running</span>
-              )}
-            </td>
-          </tr>
-          <tr>
-            <td className="muted">Detected</td>
-            <td>{formatDateTime(anomaly.detected_at)}</td>
-            <td className="muted">Opened</td>
-            <td>{formatDateTime(anomaly.opened_at)}</td>
-          </tr>
-          <tr>
-            <td className="muted">Resolved</td>
-            <td>{formatDateTime(anomaly.resolved_at)}</td>
-            <td className="muted">Consecutive abnormal buckets</td>
-            <td>{anomaly.consecutive_buckets}</td>
-          </tr>
-          <tr>
-            <td className="muted">Baseline version</td>
-            <td>
-              {anomaly.baseline_version != null ? `v${anomaly.baseline_version}` : "—"}
-            </td>
-            <td className="muted">Detection policy version</td>
-            <td>v{anomaly.policy_version}</td>
-          </tr>
-        </tbody>
-      </table>
+      {/* Confidence is secondary, and carries its limitation at the point it
+          is read rather than in a paragraph further down the page. */}
+      <p className="confidence-line">
+        <span className="muted">Confidence </span>
+        <span className="num">{formatMetric(anomaly.confidence)}</span>
+        {degenerate && (
+          <span className="muted">
+            {" · "}Confidence limited because baseline variability is zero. See
+            technical details.
+          </span>
+        )}
+      </p>
 
-      {/* --- 1. detection summary ---------------------------------------- */}
-      <DetectionSummary anomaly={anomaly} />
-
-      {/* --- 2. timeline -------------------------------------------------- */}
+      {/* --- D. the timeline --------------------------------------------- */}
       <section>
-        <h3>Timeline</h3>
+        <h2 className="section-title">Timeline</h2>
         {bucketsFailed ? (
           <div className="notice" role="alert">
-            Metric history could not be loaded. The rest of this investigation is
-            unaffected, but the timeline below is absent rather than empty.
+            Metric history could not be loaded. The rest of this investigation
+            is unaffected, but the timeline is absent rather than empty.
           </div>
         ) : (
           <VolumeChart
@@ -206,47 +193,47 @@ export default async function AnomalyDetailPage({
               label: t.to_state,
             }))}
             ariaLabel="Observed volume, expected baseline and the anomalous interval"
+            textSummary={chartSummary}
           />
         )}
       </section>
 
-      {/* --- 3. lifecycle ------------------------------------------------- */}
-      <LifecycleHistory
-        transitions={anomaly.transitions}
-        policyVersion={anomaly.policy_version}
+      {/* --- E. what changed --------------------------------------------- */}
+      <section>
+        <h2 className="section-title">What changed</h2>
+        <p className="subtitle">
+          The strongest contributors, one per dimension. These are the values
+          that moved most during the interval — a measured share of the change,
+          not a statement of cause.
+        </p>
+        <TopContributors
+          packaged={pkg}
+          anomalyType={anomaly.anomaly_type}
+          evidenceStatus={anomaly.evidence_status}
+        />
+      </section>
+
+      {/* --- F. evidence completeness, stated once ------------------------ */}
+      <EvidenceBanner
+        status={anomaly.evidence_status}
+        error={pkg?.error ?? null}
+        truncatedDimensions={truncated}
       />
 
-      {/* --- 4. evidence completeness ------------------------------------ */}
-      <EvidenceStatusPanel status={anomaly.evidence_status} packaged={pkg} />
-
-      {/* --- 5 & 6. contributors and dimension coverage ------------------- */}
-      {pkg && pkg.dimensions.length > 0 ? (
-        <>
-          <DimensionSummary dimensions={pkg.dimensions} />
-          <section>
-            <h3>Contributor dimensions</h3>
-            <p className="subtitle">
-              One section per dimension the policy requested. Dimensions that
-              could not be collected are shown here too — a hidden one would read
-              as having been checked and found clean.
-            </p>
-            {pkg.dimensions.map((d) => (
-              <ContributorTable key={d.dimension} dimension={d} />
-            ))}
-          </section>
-        </>
-      ) : (
-        <section>
-          <h3>Contributor dimensions</h3>
-          <div className="notice">
-            No dimension analysis is stored for this anomaly. No field has been
-            examined, so nothing here has been ruled out.
-          </div>
-        </section>
-      )}
-
-      {/* --- 7. provenance ------------------------------------------------ */}
-      {pkg && <QueryProvenance packaged={pkg} />}
+      {/* --- G. everything else, behind tabs ------------------------------ */}
+      <section id="evidence">
+        <h2 className="section-title">Investigation detail</h2>
+        <AnomalyTabs
+          evidence={<DimensionExplorer dimensions={pkg?.dimensions ?? []} />}
+          lifecycle={
+            <LifecycleTimeline
+              transitions={anomaly.transitions}
+              policyVersion={anomaly.policy_version}
+            />
+          }
+          technical={<TechnicalDetails anomaly={anomaly} packaged={pkg} />}
+        />
+      </section>
     </>
   );
 }

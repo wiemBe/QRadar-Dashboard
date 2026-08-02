@@ -692,6 +692,383 @@ button.action.secondary:hover {
   font-weight: var(--fw-medium);
 }
 
+/* --- incident header -------------------------------------------------------- */
+
+.incident-back {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.incident-meta {
+  margin-top: var(--sp-2);
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+}
+.incident-detector {
+  font-weight: var(--fw-medium);
+  color: var(--text-2);
+}
+/* The lifecycle badge is the page's dominant status; severity and evidence
+   beside it are deliberately quieter. */
+.pill-strong {
+  font-weight: var(--fw-semibold);
+  padding: 3px var(--sp-3);
+}
+.incident-summary {
+  margin: 0 0 var(--sp-3);
+  max-width: 90ch;
+  font-size: var(--fs-md);
+  line-height: var(--lh-prose);
+  color: var(--text);
+}
+.confidence-line {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+}
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+.main a.button-link:hover {
+  text-decoration: none;
+}
+
+/* --- top contributors -------------------------------------------------------- */
+
+.contributor-cards {
+  display: grid;
+  gap: var(--sp-4);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.contributor-value {
+  margin: var(--sp-1) 0 var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  word-break: break-word;
+}
+.contributor-change {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.contributor-stats {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+}
+
+/* --- tabs --------------------------------------------------------------------- */
+
+.tablist {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-5);
+  overflow-x: auto;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  padding: var(--sp-3) var(--sp-4);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab-active {
+  color: var(--text);
+  border-bottom-color: var(--info);
+}
+.tabpanel:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+
+/* --- disclosure ---------------------------------------------------------------- */
+
+.disclosure {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.disclosure-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  list-style: none;
+}
+.disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+/* A rotating caret drawn in CSS, so the control reads as expandable without an
+   icon font or an inline SVG in every caller. */
+.disclosure-summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  flex: none;
+  border-left: 5px solid var(--text-3);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 120ms ease;
+}
+.disclosure[open] > .disclosure-summary::before {
+  transform: rotate(90deg);
+}
+.disclosure-label {
+  flex: 1;
+}
+.disclosure-note {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-normal);
+}
+.disclosure-body {
+  padding: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+.disclosure-summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* --- filters ------------------------------------------------------------------ */
+
+.filter-more {
+  background: none;
+  border: none;
+}
+.filter-more > .disclosure-summary {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-2);
+}
+.filter-more > .disclosure-body {
+  border-top: none;
+  padding: var(--sp-3) 0 0;
+  width: 100%;
+}
+.filters-advanced {
+  margin: 0;
+}
+.filter-chips {
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-5);
+  font-size: var(--fs-sm);
+}
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+}
+.main a.filter-chip {
+  color: var(--text-2);
+}
+.main a.filter-chip:hover {
+  color: var(--text);
+  text-decoration: none;
+  border-color: var(--crit-border);
+}
+.filter-clear {
+  font-size: var(--fs-xs);
+}
+
+/* --- expandable rows ------------------------------------------------------------ */
+
+.row-toggle {
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+  cursor: pointer;
+}
+.row-toggle:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+/* The cell stays a table-cell so it fills the row height; the flex row lives
+   on an inner element. A `display: flex` td collapses to its content height,
+   which lets the scrolling cells show through underneath a pinned one. */
+.row-actions {
+  white-space: nowrap;
+}
+.row-actions-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Pin the actions column to the right edge of the scroll container.
+ *
+ * At 1024 px the anomaly table is genuinely wider than the content area, and
+ * the two honest options are to drop a required column or to let the table
+ * scroll. It scrolls — but the detail link must not be the thing that scrolls
+ * out of reach, so it stays pinned while the middle columns move under it.
+ * The opaque background is required: without it the scrolling cells show
+ * through the pinned one. */
+.sticky-actions th:last-child,
+.sticky-actions td.row-actions {
+  position: sticky;
+  right: 0;
+  background: var(--canvas);
+  box-shadow: inset 1px 0 0 var(--border);
+}
+.sticky-actions tbody tr:hover td.row-actions {
+  background: var(--surface-2);
+}
+.row-detail > td {
+  background: var(--surface-2);
+  padding: var(--sp-4);
+}
+
+/* --- dimension explorer --------------------------------------------------------- */
+
+.dimension-explorer {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--sp-6);
+  align-items: start;
+}
+.dimension-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dimension-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.dimension-button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.dimension-button-active {
+  background: var(--surface-3);
+  color: var(--text);
+  border-left-color: var(--info);
+  font-weight: var(--fw-medium);
+}
+.dimension-button-label {
+  flex: 1;
+}
+.dimension-panel-head {
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.dimension-panel-head h4 {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+.dimension-truncation {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--warn-text);
+}
+
+/* Compact key/value metadata, used for dimension stats, row detail and the
+   technical panels. Replaces the wide tables those used to be. */
+.dimension-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-6);
+  margin: 0 0 var(--sp-4);
+}
+.dimension-meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dimension-meta dt {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.dimension-meta dd {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+/* --- lifecycle timeline ---------------------------------------------------------- */
+
+.lifecycle {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lifecycle-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-5);
+  position: relative;
+}
+/* The connecting rule, drawn behind the markers; omitted on the last item so
+   the timeline ends rather than trailing off. */
+.lifecycle-item:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 14px;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong);
+}
+.lifecycle-marker {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--info);
+  margin-top: 5px;
+  z-index: 1;
+}
+.lifecycle-states {
+  gap: var(--sp-2);
+}
+.lifecycle-reason {
+  margin: var(--sp-2) 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  max-width: 80ch;
+}
+
 /* --- code ------------------------------------------------------------------ */
 
 code,
@@ -706,6 +1083,23 @@ pre {
   padding: var(--sp-3);
   overflow-x: auto;
   line-height: var(--lh-base);
+}
+/* A single-line AQL statement is long. It scrolls inside this box; without the
+   width bound it would widen the page instead. */
+.code-block {
+  max-width: 100%;
+  margin: 0;
+  white-space: pre;
+}
+.code-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-xs);
+}
+.code-panel .disclosure-body {
+  padding: var(--sp-3);
 }
 
 /* --- chart ----------------------------------------------------------------- */
@@ -767,6 +1161,30 @@ pre {
 @media (max-width: 1080px) {
   .grid-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  /* Three contributor cards do not fit legibly beside a 196 px sidebar; they
+     stack rather than shrinking their values into ellipses. */
+  .contributor-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* The dimension selector becomes a horizontal band above its panel, so the
+     contributor table gets the full content width. */
+  .dimension-explorer {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-5);
+  }
+  .dimension-list ul {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .dimension-button {
+    width: auto;
+    border-left: none;
+    border-bottom: 2px solid transparent;
+  }
+  .dimension-button-active {
+    border-left: none;
+    border-bottom-color: var(--info);
   }
 }
 

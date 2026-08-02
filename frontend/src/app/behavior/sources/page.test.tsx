@@ -88,8 +88,8 @@ describe("rendering", () => {
 
   it("distinguishes a measured zero from a value that was never measured", async () => {
     await renderPage({}, [
-      source({ name: "Stopped", observed_eps: 0, expected_eps: 5, deviation_ratio: 0 }),
-      source({ name: "Unknown", observed_eps: null, expected_eps: null, deviation_ratio: null }),
+      source({ log_source_id: "stopped", name: "Stopped", observed_eps: 0, expected_eps: 5, deviation_ratio: 0 }),
+      source({ log_source_id: "unknown", name: "Unknown", observed_eps: null, expected_eps: null, deviation_ratio: null }),
     ]);
 
     const stopped = screen.getByRole("row", { name: /Stopped/ });

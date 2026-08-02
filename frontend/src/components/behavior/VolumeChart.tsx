@@ -66,6 +66,7 @@ export function VolumeChart({
   anomalies = [],
   transitions = [],
   ariaLabel = "Observed volume against expected baseline",
+  textSummary,
 }: {
   buckets: MetricBucket[];
   expected: number | null;
@@ -74,6 +75,9 @@ export function VolumeChart({
   anomalies?: AnomalyInterval[];
   transitions?: TransitionMarker[];
   ariaLabel?: string;
+  /** A prose description of what the chart shows, for readers who cannot see
+   *  it. An aria-label alone says only that a chart is present. */
+  textSummary?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -115,7 +119,15 @@ export function VolumeChart({
       ),
     ];
 
+    // Honour the OS-level preference: the CSS guard cannot reach a canvas
+    // renderer, so the chart has to be told directly.
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
     return {
+      animation: !reduceMotion,
       grid: { left: 56, right: 24, top: 40, bottom: 40 },
       textStyle: { color: "#8b98b0" },
       legend: {
@@ -141,11 +153,25 @@ export function VolumeChart({
             p.observed == null && p.reported != null
               ? `Reported by the partial collection: ${p.reported.toFixed(2)} EPS`
               : "";
+          const band =
+            expectedLow != null && expectedHigh != null
+              ? `Expected range: ${expectedLow.toFixed(2)} – ${expectedHigh.toFixed(2)} EPS`
+              : "";
+          // Whether this instant falls inside a known anomalous interval, so
+          // the tooltip states the incident rather than only the number.
+          const inAnomaly = anomalies.find((a) => {
+            const start = Date.parse(a.start);
+            const end = a.end ? Date.parse(a.end) : Number.POSITIVE_INFINITY;
+            return p.t >= start && p.t <= end;
+          });
           return [
             new Date(p.t).toLocaleString(),
             observed,
             reported,
             expected != null ? `Expected: ${expected.toFixed(2)} EPS` : "",
+            band,
+            `Collection: ${kindMeaning(p.kind)}`,
+            inAnomaly ? `Anomalous interval: ${inAnomaly.label ?? "anomaly"}` : "",
           ]
             .filter(Boolean)
             .join("<br/>");
@@ -173,17 +199,24 @@ export function VolumeChart({
           symbolSize: 5,
           lineStyle: { color: "#4f8cff", width: 2 },
           itemStyle: { color: "#4f8cff" },
-          markArea: areas.length ? { silent: true, data: areas } : undefined,
+          markArea: areas.length
+            ? {
+                silent: true,
+                // Labels off. With several shaded intervals in one window they
+                // overprint each other into an illegible smear; the shading is
+                // explained in the note below the chart instead.
+                label: { show: false },
+                data: areas,
+              }
+            : undefined,
           markLine: transitions.length
             ? {
                 silent: true,
                 symbol: "none",
-                label: {
-                  formatter: (m: { name?: string }) => m.name ?? "",
-                  color: "#e6edf7",
-                  position: "insideEndTop",
-                  fontSize: 10,
-                },
+                // The markers stay; their labels do not. Four transitions
+                // minutes apart render their text on top of one another, and
+                // the Lifecycle tab states the same sequence legibly.
+                label: { show: false },
                 lineStyle: { color: "#8b98b0", type: "dashed" },
                 data: transitions.map((t) => ({
                   xAxis: Date.parse(t.at),
@@ -250,10 +283,13 @@ export function VolumeChart({
   return (
     <>
       <div ref={containerRef} className="chart" role="img" aria-label={ariaLabel} />
-      <p className="subtitle" style={{ marginTop: 8 }}>
+      {/* The chart's content as prose. A canvas is opaque to a screen reader,
+          so without this the series, the band and the gaps are unreachable. */}
+      {textSummary && <p className="sr-only">{textSummary}</p>}
+      <p className="subtitle chart-note">
         Gaps in the observed line are intervals that were not fully collected —
         shaded amber. They are not zero traffic. Red shading marks the anomalous
-        interval.
+        interval, and dashed vertical rules mark lifecycle transitions.
       </p>
     </>
   );

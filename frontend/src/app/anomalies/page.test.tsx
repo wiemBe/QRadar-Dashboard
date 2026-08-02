@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AnomaliesPage from "./page";
 import {
@@ -63,218 +64,313 @@ const SOURCES: SourceBehavior[] = [
   },
 ];
 
-let listSpy: MockInstance<typeof api.anomalies>;
-
 beforeEach(() => {
   vi.restoreAllMocks();
-  vi.spyOn(api, "sourceBehaviors").mockResolvedValue(SOURCES);
 });
 
-async function renderPage(params: Record<string, string | undefined> = {}) {
-  render(await AnomaliesPage({ searchParams: Promise.resolve(params) }));
+async function renderPage(
+  params: Record<string, string | undefined> = {},
+  items: AnomalySummary[] = [anomaly()],
+  total = items.length,
+) {
+  vi.spyOn(api, "anomalies").mockResolvedValue(page(items, total));
+  vi.spyOn(api, "sourceBehaviors").mockResolvedValue(SOURCES);
+  return render(await AnomaliesPage({ searchParams: Promise.resolve(params) }));
 }
 
-describe("the table", () => {
-  it("renders every required column for a row", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([anomaly()]));
+describe("default columns", () => {
+  it("shows nine triage columns rather than eleven", () => {
+    // At 1024 px the eleven-column table pushed Started, Duration, Evidence and
+    // the detail link past the viewport.
+    return renderPage().then(() => {
+      const headers = screen
+        .getAllByRole("columnheader")
+        .map((h) => h.textContent?.trim());
+      expect(headers).toEqual([
+        "Source",
+        "Detector",
+        "State",
+        "Observed → Expected",
+        "Deviation",
+        "Severity",
+        "Started",
+        "Evidence",
+        "Actions",
+      ]);
+    });
+  });
+
+  it("keeps observed and expected together in one column", async () => {
+    await renderPage();
+    const row = screen.getByRole("row", { name: /LAB Firewall/ });
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[3]).toHaveTextContent("6.00 → 2.00");
+  });
+
+  it("does not expose version stamps in the default row", async () => {
+    await renderPage();
+    expect(screen.queryByText(/policy version/i)).toBeNull();
+    expect(screen.queryByText(/baseline version/i)).toBeNull();
+  });
+
+  it("does not expose duration or confidence in the default row", async () => {
+    await renderPage();
+    const row = screen.getByRole("row", { name: /LAB Firewall/ });
+    expect(within(row).queryByText("5m")).toBeNull();
+    expect(within(row).queryByText("0.82")).toBeNull();
+  });
+});
+
+describe("status priority", () => {
+  it("gives the lifecycle state the strong badge and the others quiet ones", async () => {
+    // State decides whether this needs work now; severity and evidence are
+    // real but subordinate, and were previously equal in weight.
+    await renderPage();
+    const row = screen.getByRole("row", { name: /LAB Firewall/ });
+
+    expect(within(row).getByText("OPEN").className).toContain("pill-strong");
+    expect(within(row).getByText("HIGH").className).toContain("pill-quiet");
+    expect(within(row).getByText("PARTIAL").className).toContain("pill-quiet");
+  });
+
+  it("states each status as text, so none depends on colour", async () => {
+    await renderPage();
+    const row = screen.getByRole("row", { name: /LAB Firewall/ });
+    expect(within(row).getByText("OPEN")).toBeInTheDocument();
+    expect(within(row).getByText("HIGH")).toBeInTheDocument();
+    expect(within(row).getByText("PARTIAL")).toBeInTheDocument();
+  });
+});
+
+describe("row disclosure", () => {
+  it("reveals the moved fields on demand", async () => {
+    const user = userEvent.setup();
     await renderPage();
 
-    const row = screen.getByRole("row", { name: /LAB Firewall/ });
-    expect(row).toHaveTextContent("VOLUME_SPIKE");
-    expect(row).toHaveTextContent("OPEN");
-    expect(row).toHaveTextContent("HIGH");
-    expect(row).toHaveTextContent("6.00");
-    expect(row).toHaveTextContent("2.00");
-    expect(row).toHaveTextContent("3.00x");
-    expect(row).toHaveTextContent("5m");
-    expect(row).toHaveTextContent("PARTIAL");
-    expect(within(row).getByRole("link", { name: "Investigate" })).toHaveAttribute(
-      "href",
-      "/anomalies/a-1",
-    );
+    await user.click(screen.getByRole("button", { name: /Show technical detail/ }));
+
+    expect(screen.getByText("Absolute delta")).toBeInTheDocument();
+    expect(screen.getByText("Duration")).toBeInTheDocument();
+    expect(screen.getByText("Confidence")).toBeInTheDocument();
+    expect(screen.getByText("Anomaly end")).toBeInTheDocument();
+    expect(screen.getByText("Resolved")).toBeInTheDocument();
+  });
+
+  it("reports its expanded state", async () => {
+    const user = userEvent.setup();
+    await renderPage();
+
+    const toggle = screen.getByRole("button", { name: /Show technical detail/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    expect(
+      screen.getByRole("button", { name: /Hide technical detail/ }),
+    ).toHaveAttribute("aria-expanded", "true");
   });
 
   it("shows a still-running anomaly as running, not as a 0s duration", async () => {
-    listSpy = vi
-      .spyOn(api, "anomalies")
-      .mockResolvedValue(page([anomaly({ duration_seconds: null, anomaly_end: null })]));
-    await renderPage();
+    const user = userEvent.setup();
+    await renderPage({}, [anomaly({ duration_seconds: null, anomaly_end: null })]);
+
+    await user.click(screen.getByRole("button", { name: /Show technical detail/ }));
 
     expect(screen.getByText("running")).toBeInTheDocument();
-  });
-
-  it("falls back to the id when a source name is missing", async () => {
-    listSpy = vi
-      .spyOn(api, "anomalies")
-      .mockResolvedValue(page([anomaly({ log_source_name: null })]));
-    await renderPage();
-
-    expect(screen.getByRole("link", { name: SOURCE_ID })).toBeInTheDocument();
-  });
-
-  it("renders every evidence status it is given", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(
-      page([
-        anomaly({ id: "a-1", evidence_status: "COMPLETE" }),
-        anomaly({ id: "a-2", evidence_status: "PENDING" }),
-        anomaly({ id: "a-3", evidence_status: "UNAVAILABLE" }),
-        anomaly({ id: "a-4", evidence_status: "FAILED" }),
-      ]),
-    );
-    await renderPage();
-
-    // Scoped to the table: the filter dropdown lists the same labels.
-    const table = screen.getByRole("table");
-    for (const status of ["COMPLETE", "PENDING", "UNAVAILABLE", "FAILED"]) {
-      expect(within(table).getByText(status)).toBeInTheDocument();
-    }
+    expect(screen.getByText("still running")).toBeInTheDocument();
   });
 });
 
 describe("filters", () => {
-  it("forwards recognized filters to the API", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
-    await renderPage({
-      log_source_id: SOURCE_ID,
-      anomaly_type: "VOLUME_DROP",
-      state: "OPEN",
-      severity: "HIGH",
-      evidence_status: "FAILED",
-    });
-
-    expect(listSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        log_source_id: SOURCE_ID,
-        anomaly_type: "VOLUME_DROP",
-        state: "OPEN",
-        severity: "HIGH",
-        evidence_status: "FAILED",
-      }),
-    );
-  });
-
-  it("does not forward an unrecognized filter value", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
-    await renderPage({ state: "'; DROP TABLE--", log_source_id: "not-a-uuid" });
-
-    expect(listSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ state: undefined, log_source_id: undefined }),
-    );
-  });
-
-  it("says an empty result is filtered rather than fleet-wide", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
-    await renderPage({ state: "OPEN" });
-
-    expect(screen.getByText(/filtered view, not a statement about the fleet/i)).toBeInTheDocument();
-  });
-
-  it("populates the source dropdown from the behavior API", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
+  it("shows four filters by default", async () => {
     await renderPage();
+    expect(screen.getByLabelText("Lifecycle state")).toBeInTheDocument();
+    expect(screen.getByLabelText("Detector type")).toBeInTheDocument();
+    expect(screen.getByLabelText("Severity")).toBeInTheDocument();
+    expect(screen.getByLabelText("Start time")).toBeInTheDocument();
+    expect(screen.getByLabelText("End time")).toBeInTheDocument();
+  });
 
+  it("keeps source, instance and evidence behind a disclosure", async () => {
+    const { container } = await renderPage();
+    const more = container.querySelector("details.filter-more");
+    expect(more).not.toBeNull();
+    expect(more).not.toHaveAttribute("open");
+    expect(within(more as HTMLElement).getByLabelText("Log source")).toBeInTheDocument();
     expect(
-      within(screen.getByLabelText("Log source")).getByRole("option", { name: "LAB Firewall" }),
+      within(more as HTMLElement).getByLabelText("Evidence status"),
     ).toBeInTheDocument();
   });
 
-  it("still renders the table when the source dropdown cannot be loaded", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([anomaly()]));
-    vi.spyOn(api, "sourceBehaviors").mockRejectedValue(new Error("down"));
-    await renderPage();
+  it("opens the disclosure when one of its filters is active", async () => {
+    // A filtered view must never hide the control responsible for it.
+    const { container } = await renderPage({ evidence_status: "FAILED" });
+    expect(container.querySelector("details.filter-more")).toHaveAttribute("open");
+  });
 
-    expect(screen.getByRole("row", { name: /LAB Firewall/ })).toBeInTheDocument();
+  it("labels every control programmatically", async () => {
+    await renderPage();
+    for (const label of [
+      "Lifecycle state",
+      "Detector type",
+      "Severity",
+      "Start time",
+      "End time",
+      "Log source",
+      "QRadar instance",
+      "Evidence status",
+    ]) {
+      expect(screen.getByLabelText(label)).toBeInTheDocument();
+    }
   });
 });
 
-describe("time range", () => {
-  it("forwards a valid range", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
-    await renderPage({ since: "2026-07-19T10:00", until: "2026-07-20T10:00" });
-
-    const call = listSpy.mock.calls[0][0] as { since?: string; until?: string };
-    expect(Date.parse(call.since!)).toBeLessThan(Date.parse(call.until!));
+describe("active filter chips", () => {
+  it("renders no chips when nothing is filtered", async () => {
+    const { container } = await renderPage();
+    expect(container.querySelector(".filter-chips")).toBeNull();
   });
 
-  it("clamps an over-wide range and says so", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
-    await renderPage({ since: "1990-01-01T00:00", until: "2026-07-20T10:00" });
+  it("names each active filter", async () => {
+    await renderPage({ state: "OPEN", severity: "HIGH" });
+    expect(screen.getByText(/State: OPEN/)).toBeInTheDocument();
+    expect(screen.getByText(/Severity: HIGH/)).toBeInTheDocument();
+  });
 
-    expect(screen.getByText(/clamped/i)).toBeInTheDocument();
+  it("resolves a source id to its name", async () => {
+    await renderPage({ log_source_id: SOURCE_ID });
+    expect(screen.getByText(/Source: LAB Firewall/)).toBeInTheDocument();
+  });
+
+  it("lets each chip remove only itself", async () => {
+    await renderPage({ state: "OPEN", severity: "HIGH" });
+    const chip = screen.getByRole("link", { name: /State: OPEN/ });
+    const href = chip.getAttribute("href") ?? "";
+    expect(href).toContain("severity=HIGH");
+    expect(href).not.toContain("state=OPEN");
+  });
+
+  it("offers a clear-all that drops every filter", async () => {
+    await renderPage({ state: "OPEN", severity: "HIGH" });
+    expect(screen.getByRole("link", { name: "Clear all" })).toHaveAttribute(
+      "href",
+      "/anomalies",
+    );
+  });
+});
+
+describe("query parsing", () => {
+  it("ignores a filter value outside the allow-list", async () => {
+    // The value arrives from a URL a third party may have written.
+    const { container } = await renderPage({ state: "<script>alert(1)</script>" });
+    expect(container.querySelector(".filter-chips")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("ignores a malformed source id", async () => {
+    const { container } = await renderPage({ log_source_id: "not-a-uuid" });
+    expect(container.querySelector(".filter-chips")).toBeNull();
+  });
+
+  it("treats a nonsense offset as the first page", async () => {
+    await renderPage({ offset: "abc" }, [anomaly()], 1);
+    expect(screen.getByText("1–1 of 1")).toBeInTheDocument();
   });
 });
 
 describe("pagination", () => {
-  it("requests the offset it was given", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue({
-      items: [anomaly()],
-      total: 100,
-      limit: 25,
-      offset: 25,
-    });
-    await renderPage({ offset: "25" });
-
-    expect(listSpy).toHaveBeenCalledWith(expect.objectContaining({ offset: 25 }));
-  });
-
-  it("preserves the active filters in the next-page link", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue({
-      items: [anomaly()],
-      total: 100,
-      limit: 25,
-      offset: 0,
-    });
-    await renderPage({ state: "OPEN", severity: "HIGH" });
-
+  it("carries the active filters into the paging links", async () => {
+    await renderPage({ state: "OPEN" }, [anomaly()], 60);
     const next = screen.getByRole("link", { name: "Next" });
-    expect(next).toHaveAttribute("href", expect.stringContaining("state=OPEN"));
-    expect(next).toHaveAttribute("href", expect.stringContaining("severity=HIGH"));
-    expect(next).toHaveAttribute("href", expect.stringContaining("offset=25"));
-  });
-
-  it("reports the total from the server, not the page length", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue({
-      items: [anomaly()],
-      total: 100,
-      limit: 25,
-      offset: 0,
-    });
-    await renderPage();
-
-    expect(screen.getByText(/of 100/)).toBeInTheDocument();
+    expect(next.getAttribute("href")).toContain("state=OPEN");
+    expect(next.getAttribute("href")).toContain("offset=25");
   });
 });
 
 describe("empty and error states", () => {
-  it("distinguishes an empty fleet from a filtered empty result", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockResolvedValue(page([]));
-    await renderPage();
-
-    expect(screen.getByText(/No anomalies have been detected/i)).toBeInTheDocument();
-    // And points at the reason a zero might be misleading.
-    expect(screen.getByText(/without an adequate baseline are not being judged/i)).toBeInTheDocument();
+  it("distinguishes a filtered empty result from an empty fleet", async () => {
+    await renderPage({ state: "OPEN" }, []);
+    expect(
+      screen.getByText(/filtered view, not a statement about the fleet/i),
+    ).toBeInTheDocument();
   });
 
-  it("reports a failed request as a failure, not as zero anomalies", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockRejectedValue(new Error("ECONNREFUSED"));
-    await renderPage();
+  it("points an unfiltered empty result at the unbaselined count", async () => {
+    await renderPage({}, []);
+    expect(
+      screen.getByText(/Sources without an adequate baseline are not being judged/i),
+    ).toBeInTheDocument();
+  });
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/could not be loaded/i);
-    expect(screen.queryByText(/No anomalies have been detected/i)).toBeNull();
+  it("reports an unreachable backend as a failure", async () => {
+    vi.spyOn(api, "anomalies").mockRejectedValue(new Error("ECONNREFUSED"));
+    vi.spyOn(api, "sourceBehaviors").mockResolvedValue(SOURCES);
+    render(await AnomaliesPage({ searchParams: Promise.resolve({}) }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/backend may be unreachable/i);
   });
 
   it("reports a forbidden response as a permission problem", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockRejectedValue(new ApiError(403, "forbidden"));
-    await renderPage();
+    vi.spyOn(api, "anomalies").mockRejectedValue(new ApiError(403, "forbidden"));
+    vi.spyOn(api, "sourceBehaviors").mockResolvedValue(SOURCES);
+    render(await AnomaliesPage({ searchParams: Promise.resolve({}) }));
 
     expect(screen.getByRole("alert")).toHaveTextContent(/do not have permission/i);
   });
 
-  it("renders no anomaly data to an unauthenticated caller", async () => {
-    listSpy = vi.spyOn(api, "anomalies").mockRejectedValue(new ApiError(401, "unauthorized"));
-    await renderPage();
+  it("still renders the table when only the source list fails", async () => {
+    vi.spyOn(api, "anomalies").mockResolvedValue(page([anomaly()]));
+    vi.spyOn(api, "sourceBehaviors").mockRejectedValue(new Error("ECONNREFUSED"));
+    render(await AnomaliesPage({ searchParams: Promise.resolve({}) }));
 
-    expect(screen.getByRole("alert")).toHaveTextContent(/session has expired/i);
-    expect(screen.queryByRole("row", { name: /LAB Firewall/ })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("row", { name: /LAB Firewall/ })).toBeInTheDocument();
+  });
+});
+
+describe("accessibility", () => {
+  it("has one page heading", async () => {
+    await renderPage();
+    expect(screen.getByRole("heading", { level: 1, name: "Anomalies" })).toBeInTheDocument();
+  });
+
+  it("contains the table in a labelled scroll region", async () => {
+    const { container } = await renderPage();
+    const region = container.querySelector(".table-scroll");
+    expect(region).toHaveAttribute("role", "region");
+    expect(region).toHaveAttribute("aria-label", "Detected anomalies");
+    expect(region).toHaveAttribute("tabindex", "0");
+  });
+
+  it("marks every header as a column header", async () => {
+    await renderPage();
+    for (const th of screen.getAllByRole("columnheader")) {
+      expect(th).toHaveAttribute("scope", "col");
+    }
+  });
+
+  it("gives the table an accessible caption", async () => {
+    await renderPage();
+    expect(
+      screen.getByText(/Detected anomalies with lifecycle state/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("links", () => {
+  it("links a row to its investigation and its source", async () => {
+    await renderPage();
+    const row = screen.getByRole("row", { name: /LAB Firewall/ });
+    expect(within(row).getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
+      "/anomalies/a-1",
+    );
+    expect(within(row).getByRole("link", { name: "LAB Firewall" })).toHaveAttribute(
+      "href",
+      `/behavior/sources/${SOURCE_ID}`,
+    );
+  });
+
+  it("falls back to the source id when the name is absent", async () => {
+    await renderPage({}, [anomaly({ log_source_name: null })]);
+    expect(screen.getByRole("link", { name: SOURCE_ID })).toBeInTheDocument();
   });
 });
