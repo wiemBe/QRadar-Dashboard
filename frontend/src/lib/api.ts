@@ -152,21 +152,6 @@ export interface SearchVersion {
   created_at: string;
 }
 
-export interface Anomaly {
-  id: string;
-  log_source_id: string;
-  anomaly_type: string;
-  severity: string;
-  detected_at: string;
-  resolved_at: string | null;
-  observed_value: number | null;
-  expected_value: number | null;
-  deviation_score: number | null;
-  explanation: string | null;
-  details: Record<string, unknown>;
-  suppressed: boolean;
-}
-
 export interface Alert {
   id: string;
   fingerprint: string;
@@ -436,6 +421,257 @@ export interface DataSourceCoverageView {
   techniques: string[];
 }
 
+// --- Phase A types: behavioral analytics ----------------------------------
+// These mirror app/schemas/anomaly.py exactly, including its nullability. The
+// backend's rule is that a value which was not measured is `null`, never 0 —
+// so every optional number here is `number | null` rather than `number`, and no
+// field is widened to `unknown` or `any`. Narrowing one of these to a plain
+// `number` would let a missing measurement render as a real zero.
+
+export type AnomalyState =
+  | "INSUFFICIENT_DATA"
+  | "NORMAL"
+  | "CANDIDATE"
+  | "OPEN"
+  | "RECOVERING"
+  | "RESOLVED"
+  | "SUPPRESSED";
+
+export type BucketCompleteness = "COMPLETE" | "PARTIAL" | "MISSING";
+
+export type EvidenceStatus =
+  | "NOT_REQUESTED"
+  | "PENDING"
+  | "COMPLETE"
+  | "PARTIAL"
+  | "UNAVAILABLE"
+  | "FAILED";
+
+export type DimensionAvailability =
+  | "AVAILABLE"
+  | "TRUNCATED"
+  | "UNAVAILABLE"
+  | "FAILED";
+
+export type RobustScoreStatus = "OK" | "DEGENERATE" | "UNAVAILABLE";
+
+export interface MetricBucket {
+  bucket_start: string;
+  bucket_seconds: number;
+  event_count: number;
+  average_eps: number;
+  peak_eps: number;
+  completeness: BucketCompleteness;
+  last_event_at: string | null;
+}
+
+export interface BaselineCell {
+  metric_name: string;
+  weekday: number;
+  hour: number;
+  median: number;
+  mad: number;
+  p05: number | null;
+  p95: number | null;
+  sample_count: number;
+  // False means the cell exists but is still learning. Never render as healthy.
+  is_reliable: boolean;
+  completeness: number;
+  baseline_version: number;
+  computed_at: string | null;
+}
+
+export interface SourceBehavior {
+  log_source_id: string;
+  name: string;
+  criticality: string;
+  observed_eps: number | null;
+  expected_eps: number | null;
+  expected_low: number | null;
+  expected_high: number | null;
+  // null when expected is zero: a ratio against nothing does not exist.
+  deviation_ratio: number | null;
+  state: AnomalyState;
+  baseline_sample_count: number;
+  baseline_completeness: number;
+  last_bucket_at: string | null;
+  last_event_at: string | null;
+  open_anomaly_count: number;
+}
+
+export interface AnomalyTransition {
+  from_state: AnomalyState | null;
+  to_state: AnomalyState;
+  occurred_at: string;
+  bucket_start: string | null;
+  reason: string | null;
+  actor: string;
+  observed_value: number | null;
+  expected_value: number | null;
+}
+
+export interface AnomalySummary {
+  id: string;
+  log_source_id: string;
+  log_source_name: string | null;
+  anomaly_type: string;
+  state: AnomalyState;
+  severity: string;
+  observed_value: number | null;
+  expected_value: number | null;
+  deviation_ratio: number | null;
+  robust_z: number | null;
+  absolute_delta: number | null;
+  consecutive_buckets: number;
+  confidence: number | null;
+  detected_at: string;
+  opened_at: string | null;
+  anomaly_start: string | null;
+  anomaly_end: string | null;
+  resolved_at: string | null;
+  // null while the anomaly is still running — not 0, and not "now minus start".
+  duration_seconds: number | null;
+  evidence_status: EvidenceStatus;
+  suppressed: boolean;
+  explanation: string | null;
+}
+
+export interface Contributor {
+  dimension: string;
+  value: string;
+  label: string | null;
+  baseline_count: number;
+  anomaly_count: number;
+  absolute_delta: number;
+  // null for a newly observed value: it has no baseline to be a percent of.
+  percent_delta: number | null;
+  anomaly_share: number | null;
+  baseline_share: number | null;
+  contribution_share: number | null;
+  baseline_rank: number | null;
+  anomaly_rank: number | null;
+  rank: number;
+  is_new: boolean;
+  is_disappeared: boolean;
+}
+
+export interface ExplanationDimension {
+  dimension: string;
+  availability: DimensionAvailability;
+  detail: string | null;
+  baseline_distinct_count: number | null;
+  anomaly_distinct_count: number | null;
+  cardinality_ratio: number | null;
+  new_value_count: number;
+  disappeared_value_count: number;
+  baseline_top_share: number | null;
+  anomaly_top_share: number | null;
+  truncated: boolean;
+  contributors: Contributor[];
+}
+
+// Sanitized query provenance: AQL text, row counts and window bounds. Non-secret
+// by construction — the backend never puts a token, header or response body
+// here. Typed loosely because it is a bounded audit document rather than a
+// contract, and it is rendered as text, never interpreted.
+export interface QueryProvenanceEntry {
+  dimension?: string;
+  window?: string;
+  aql?: string;
+  rows?: number;
+  truncated?: boolean;
+  error?: string | null;
+}
+
+export interface QueryProvenance {
+  comparison_strategy?: string;
+  anomaly_window?: { start?: string; end?: string; seconds?: number };
+  baseline_window?: { start?: string; end?: string; seconds?: number };
+  queries?: QueryProvenanceEntry[];
+}
+
+export interface ExplanationPackage {
+  status: EvidenceStatus;
+  error: string | null;
+  anomaly_window_start: string;
+  anomaly_window_end: string;
+  baseline_window_start: string;
+  baseline_window_end: string;
+  comparison_strategy: string;
+  anomaly_total_events: number;
+  baseline_total_events: number;
+  requested_at: string | null;
+  completed_at: string | null;
+  collection_duration_ms: number | null;
+  query_provenance: QueryProvenance;
+  schema_version: number;
+  dimensions: ExplanationDimension[];
+}
+
+// The detector's own working. Every field is optional: an older anomaly, or one
+// from a detector that does not compute a given quantity, has no value for it,
+// which must render as "not recorded" rather than as 0.
+export interface DetectionDetail {
+  reason: string | null;
+  expected_low: number | null;
+  expected_high: number | null;
+  threshold: number | null;
+  baseline_sample_count: number | null;
+  baseline_completeness: number | null;
+  baseline_version: number | null;
+  observed_eps: number | null;
+  expected_eps: number | null;
+  observed_events: number | null;
+  expected_events: number | null;
+  absolute_delta_events: number | null;
+  bucket_seconds: number | null;
+  ratio: number | null;
+  ratio_basis: string | null;
+  robust_score_status: RobustScoreStatus | null;
+  robust_z: number | null;
+  fallback_bound: number | null;
+}
+
+export interface AnomalyDetail extends AnomalySummary {
+  baseline_version: number | null;
+  policy_version: number;
+  transitions: AnomalyTransition[];
+  // null when evidence was never requested or has not been collected yet.
+  explanation_package: ExplanationPackage | null;
+  detection: DetectionDetail | null;
+}
+
+export interface BehaviorSummary {
+  open_anomalies: number;
+  spikes: number;
+  drops: number;
+  silent_sources: number;
+  candidates: number;
+  recovering: number;
+  // Counted apart from healthy sources: an unbaselined source is an
+  // observability gap, not a clean bill of health.
+  insufficient_data_sources: number;
+  monitored_sources: number;
+  evidence_pending: number;
+  evidence_failed: number;
+  recently_resolved: AnomalySummary[];
+  highest_deviation: AnomalySummary[];
+}
+
+export interface AnomalyListParams {
+  limit?: number;
+  offset?: number;
+  log_source_id?: string;
+  instance_id?: string;
+  anomaly_type?: string;
+  state?: string;
+  severity?: string;
+  evidence_status?: string;
+  active_only?: boolean;
+  since?: string;
+  until?: string;
+}
+
 function qs(params: Record<string, string | number | boolean | undefined>): string {
   const parts = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== "")
@@ -463,9 +699,6 @@ export const api = {
   // endpoints and surface the status, they never pre-judge permissions here.
   runSearch: (id: string) =>
     request<SearchExecution>(`/searches/${id}/run`, { method: "POST" }),
-
-  anomalies: (openOnly = false) =>
-    request<Anomaly[]>(`/anomalies${openOnly ? "?open_only=true" : ""}`),
 
   alerts: (status?: string) =>
     request<Alert[]>(`/alerts${status ? `?status=${status}` : ""}`),
@@ -508,6 +741,22 @@ export const api = {
   coverageByRule: () => request<RuleCoverageView[]>("/coverage/by-rule"),
   coverageByDataSource: () =>
     request<DataSourceCoverageView[]>("/coverage/by-data-source"),
+
+  // --- Phase A: behavioral anomaly detection and investigation -------------
+  // Read-only. The anomaly engine runs in the backend; nothing here triggers
+  // detection, and there is no QRadar call path from the browser.
+  anomalies: (params: AnomalyListParams = {}) =>
+    request<Page<AnomalySummary>>(`/anomalies${qs({ ...params })}`),
+  anomaly: (id: string) => request<AnomalyDetail>(`/anomalies/${id}`),
+  behaviorSummary: () => request<BehaviorSummary>("/anomalies/summary"),
+
+  sourceBehaviors: () => request<SourceBehavior[]>("/behavior/sources"),
+  sourceBehavior: (id: string) =>
+    request<SourceBehavior>(`/behavior/sources/${id}`),
+  sourceMetrics: (id: string, params: { since?: string; until?: string; limit?: number } = {}) =>
+    request<MetricBucket[]>(`/behavior/sources/${id}/metrics${qs({ ...params })}`),
+  sourceBaselines: (id: string, metric = "average_eps") =>
+    request<BaselineCell[]>(`/behavior/sources/${id}/baselines${qs({ metric })}`),
 
   acknowledgeAlert: (id: string) =>
     request<Alert>(`/alerts/${id}/acknowledge`, { method: "POST" }),
