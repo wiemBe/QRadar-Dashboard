@@ -581,6 +581,170 @@ the isolation claim, which concerns 227 versus 262/263 inside the 20:32–20:48Z
 Across the whole database: 6 incidents, 5 RESOLVED and 1 NORMAL (the unopened candidate above), 20
 transitions, zero duplicate natural keys, zero non-COMPLETE buckets.
 
-## Still outstanding
+## NO_EVENTS / silence validation (PASSED — after two blocking fixes)
 
-Silence validation, `LAB_MODE` and source-override cleanup, and the final gate run.
+Run on **QRadar ID 262 / `lab-fw-volume-02`**, using the generator's own
+`source-volume-silence` scenario, which targets `lab-fw-volume-02` by design. Source 263 was the
+stated preference, but neither 263 nor 262 had an adequate hour-21 seasonal cell, so 263 offered no
+advantage, and forcing it would have meant leaving the designed scenario path.
+
+### Two blockers found and fixed
+
+Preflight showed the silence test could not pass as written. Both causes were real product defects,
+not lab artifacts, and both were fixed with regression tests before the run.
+
+**1. Silence left no evidence at all** (`57ccd19`). QRadar omits a source with no events from the
+`GROUP BY logsourceid` aggregate, so a silent interval wrote no metric row. The engine evaluates the
+newest row it can find, so it re-judged the last busy bucket forever. `detect_no_events` requires a
+COMPLETE bucket whose count is zero, and `_preceding_empty_buckets` counts consecutive complete zero
+buckets — both were written expecting rows the collector never produced, so the detector was
+reachable only from hand-built unit-test contexts.
+
+Proven live before the fix: source 263 was genuinely silent for nine minutes with collection current
+at 39 s lag and zero failures, and its `NO_EVENTS` state stayed `NORMAL` pinned to
+`last_interval_start = 20:48:00Z`.
+
+The collector now writes an explicit zero bucket for every *monitored* source absent from the
+result, marked `zero_filled: true` in provenance. The zero is an observation — the query succeeded
+and returned no events — which is why it is COMPLETE; a failed or partial collection raises before
+that point, so no zero row is written for an unobserved window.
+
+**2. An open incident deadlocked its own recovery** (`4892f8e`). `_excluded_intervals` bounded every
+exclusion span with `resolved_at or end`, so anything unresolved excluded buckets to the end of the
+lookback window. An OPEN incident therefore excluded the very buckets a new seasonal cell needed;
+the detector had no baseline, returned `INSUFFICIENT_DATA` instead of a healthy verdict, and the
+incident could never recover. A `CANDIDATE` that returns to normal before opening keeps
+`resolved_at` NULL forever, poisoning that source's cell permanently.
+
+Proven live: source 262 sat OPEN through seven consecutive normal buckets at 299 events with
+`consecutive_healthy` stuck at **0**, and its hour-21 cell would not form. After the fix
+(`resolved_at or anomaly_end or end`) that incident — OPEN since 20:50:39Z — finally recovered and
+resolved at **21:28:04Z**, having been deadlocked for 37 minutes.
+
+Both are the same root cause as `ec5d352`: reading `resolved_at` as a lifecycle signal.
+
+### Acceptance evidence
+
+| Item | Value |
+|---|---|
+| Run IDs | `labrun-silence-20260802T210428Z` (2,400/2,400), `labrun-silence2-20260802T212039Z` (4,200/4,200), `labrun-silence3-20260802T213720Z` (recovery) |
+| Source | QRadar ID **262**, `lab-fw-volume-02`, Netgate pfSense |
+| Baseline window | hour-21 cell, weekday 7 |
+| Baseline sample count | **25** (1 excluded), reliable |
+| Expected | **298 events / 4.97 EPS**, MAD 2 events — a real MAD, so this run used the robust path rather than the zero-MAD fallback |
+| Last actual event | 21:34:59.893Z (generator end) |
+| Silence start | **21:35:00Z** |
+| Grace period | 1 bucket (`anomaly_silence_grace_buckets`) |
+| First zero observation | bucket `21:35:00Z` — inside grace |
+| First anomalous bucket | `21:36:00Z` (second consecutive empty) |
+| Collection completeness | every bucket **COMPLETE** throughout |
+| Watermark lag during silence | **3–4 s**, 0 consecutive failures |
+| OPEN | **21:37:04.094Z** — *"1 consecutive abnormal bucket(s)"* |
+| Restart | **21:38:00Z** |
+| RECOVERING | **21:39:04.084Z** — *"normal bucket observed"* |
+| RESOLVED | **21:40:04.191Z** — *"2 consecutive normal bucket(s) reached the recovery threshold of 2"* |
+| Task failures / retries | **0** |
+| Duplicate incidents | **0** — exactly one NO_EVENTS incident for 262 |
+
+Detector payload: `observed 0`, `expected 298`, severity HIGH, confidence 0.80, baseline version 1,
+reason *"no events for 2 consecutive bucket(s) where the baseline expects about 298 events"*, with
+`empty_buckets: 2`, `grace_buckets: 1`.
+
+Buckets across the window, all COMPLETE:
+
+| Bucket | Events | Source |
+|---|---:|---|
+| 21:32–21:34Z | 300, 300, 299 | reported |
+| 21:35Z | **0** | `zero_filled` |
+| 21:36Z | **0** | `zero_filled` |
+| 21:37Z | **0** | `zero_filled` |
+| 21:38–21:39Z | 297, 299 | reported |
+
+**There was no CANDIDATE state.** Source 262 has no override, so the global
+`anomaly_open_after_intervals = 1` applies and a single confirmed abnormal bucket promotes
+`NORMAL → OPEN` directly. The transition trail is `NORMAL → OPEN → RECOVERING → RESOLVED`. Reporting
+a CANDIDATE here would be false.
+
+No synthetic zero event or heartbeat was sent. The zero buckets are collector-side observations of
+an empty successful query, not generated telemetry. Collection stayed current and successful for the
+whole silence window, so none of the disqualifying conditions — stale watermark, failed query,
+collector retry, QRadar outage, incomplete bucket, host suspension, Celery backlog — applied.
+
+### How NO_EVENTS represents silence — honestly
+
+It uses **a persisted zero-valued COMPLETE bucket**. `detect_no_events` reads `point.event_count`
+and `point.completeness` and requires a count of zero on a COMPLETE bucket; the streak comes from
+`_preceding_empty_buckets`, which counts consecutive complete zero buckets. It does **not** use a
+last-event timestamp or the absence of a row — absence of a row is exactly what made it unreachable
+before `57ccd19`. Those zero rows are now produced by the collector, which is what the detector's
+contract always assumed.
+
+## Cleanup and production-default restoration
+
+Performed at 21:46Z, after every live scenario had reached its terminal state and all generators had
+stopped (no generator process remained).
+
+`LAB_MODE=false` set in the local `.env`; source 227's `{"open_after": 2}` cleared, and a sweep
+confirmed no other source carried a lab override. Backend, celery-worker and celery-beat were
+recreated and **all three** verified to have loaded the production values:
+
+| Setting | Lab value | Restored production value |
+|---|---:|---:|
+| `lab_mode` | true | **false** |
+| `collection_interval_seconds` | 60 | **300** |
+| `baseline_min_samples` | 4 | **8** |
+| `anomaly_open_after_intervals` | 1 (227: 2) | **2** |
+| `anomaly_resolve_after_intervals` | 2 | **3** |
+| `anomaly_spike_ratio` | 2.0 | 2.0 |
+| `anomaly_drop_ratio` | 0.5 | 0.5 |
+| `anomaly_min_absolute_delta_events` | 100 | 100 |
+| `anomaly_min_bucket_events` | 50 | 50 |
+| `anomaly_silence_grace_buckets` | 1 | 1 |
+
+All live history preserved — nothing was deleted or suppressed: **3,552** metric buckets, **212**
+baseline cells, **14** incidents, **40** transitions, **10** explanation packages, **289**
+contributor rows, **100** dimension rows.
+
+The manually created QRadar log sources (227, 262, 263) were left in place. `.env` and `lab-runs/`
+remain gitignored and `tools/lloggen.py` remains untracked.
+
+## Real appliance-telemetry anomalies observed during testing
+
+Two incidents opened on QRadar's **own internal log sources**, outside the lab set:
+`System Notification-2 :: qradarce2` (`VOLUME_SPIKE`, 20:10Z) and `SIM Audit-2 :: qradarce2`
+(`VOLUME_SPIKE`, 20:14Z), both since RESOLVED. Their volume genuinely varied — these are true
+detections against real appliance telemetry, not generator traffic and not false positives. They
+occurred outside the multi-source validation interval and do not affect the isolation result. They
+are preserved deliberately rather than deleted to make the lab result look tidier.
+
+## Final gates (2026-08-02)
+
+| Gate | Result |
+|---|---|
+| `ruff check app tests` | clean |
+| `mypy app` | 31 errors in 18 files — unchanged baseline, none in changed files |
+| `pytest -m "not integration"` | **852 passed** |
+| `pytest -m integration` | **310 passed** |
+| `pytest` (full) | **1,162 passed, 0 failed** |
+| generator tests (run separately, no live QRadar) | **127 passed** |
+| `alembic upgrade head` / `alembic check` | clean, revision **0004 (head)** |
+| frontend `lint` / `typecheck` | clean |
+| frontend `npm run test` | **280 passed** |
+| frontend `npm run build` | compiled successfully, 15/15 static pages |
+| Compose stack | all six services healthy |
+
+`npm audit --omit=dev` reports **5 vulnerabilities (2 moderate, 3 high)** in `echarts` (<6.1.0),
+`postcss` (<=8.5.17) and `sharp` (<0.35.0, inherited libvips CVEs). All are flagged
+`fix available via npm audit fix --force`, which was **not** run — it would force breaking major
+upgrades. These are recorded as a follow-up, not silently cleared.
+
+## Operational follow-ups carried forward
+
+1. **Contended watermark advancement** — last-write-wins; see
+   `docs/PHASE-A-SOURCE-VOLUME-ANOMALY.md` §11.1.
+2. **Active-incident predicates must use state** — invariant documented in §11.2.
+3. **Intermittent `MissingGreenlet` in `collect_metrics`** — self-heals via the watermark, burns a
+   cycle; 3 occurrences on 2026-08-02.
+4. **Local-development auth privilege asymmetry** — unauthenticated caller outranks a token-bearing
+   one under `AUTH_PROVIDER=local`; see §11.3.
+5. **Frontend dependency advisories** — 5 findings needing major upgrades.

@@ -230,17 +230,38 @@ behavioral frontend.
 A Phase A scenario never changes hostname mid-run, and the RFC3164 hostname is exactly the QRadar
 log-source identifier.
 
-| Host / log-source identifier | Device address | Kind |
-|---|---|---|
-| `lab-fw-volume-01` | `10.20.0.11` | firewall (default for single-source scenarios) |
-| `lab-fw-volume-02` | `10.20.0.12` | firewall (default for `source-volume-silence`) |
-| `lab-fw-volume-03` | `10.20.0.13` | firewall |
+| Host / log-source identifier | Device address | Kind | Live QRadar ID |
+|---|---|---|---:|
+| `lab-fw-volume-01` | `10.20.0.11` | firewall (default for single-source scenarios) | **227** |
+| `lab-fw-volume-02` | `10.20.0.12` | firewall (default for `source-volume-silence`) | **262** |
+| `lab-fw-volume-03` | `10.20.0.13` | firewall | **263** |
 | `lab-waf-volume-01` | `10.20.0.21` | WAF |
 | `lab-ips-volume-01` | `10.20.0.31` | IPS |
 
 Multi-source scenarios always use `lab-fw-volume-01/02/03`, and only the first one changes rate.
 Silence defaults to `lab-fw-volume-02` so a silence run never erases the history of the source used
 for spike and drop. Do not run silence and a multi-source scenario at the same time.
+
+The three firewall identities are configured on the lab appliance as **Netgate pfSense** log sources
+on event collector 7 — not Universal LEEF. pfSense gives native parsing of source and destination
+address, ports, protocol, event name, category and severity, which is what makes contributor
+evidence usable. Two consequences show up in live evidence and are documented rather than papered
+over: QRadar normalizes the firewall action to **`R2L`**, not `DENY`, and the DSM populates no
+`username`, so that dimension is always `UNAVAILABLE` for these sources.
+
+### Seasonal-cell alignment when scheduling a run
+
+Baselines are per `(weekday, hour)` cell, so a run that crosses an hour boundary splits its samples
+across two cells and can leave the second one below the sample minimum. Start a scenario on a clean
+minute boundary and size it to finish inside the same UTC hour. Where a source already has history
+in the current cell at a different rate, either match that rate or move to the next clean hour —
+2026-08-02 validation used hour 18 for spike, hour 20 for drop and multi-source, and hour 21 for
+silence, precisely to keep each cell coherent.
+
+Note that `NO_EVENTS` needs a **reliable cell that expects traffic**. A brand-new seasonal cell has
+no baseline, so silence in it yields `INSUFFICIENT_DATA`, not an anomaly. Build the cell with real
+traffic and rebuild the baseline *while traffic is still flowing*, before stopping — otherwise the
+zero buckets that silence produces are themselves folded into the median.
 
 ### Event format
 

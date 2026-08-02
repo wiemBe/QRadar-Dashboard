@@ -886,14 +886,40 @@ Two operational notes worth carrying forward:
   shows it. Fix: `docker network rm qradar-vmnet && bash
   deploy/create-vmnet.sh`.
 
+## Phase A live validation — complete (2026-08-02)
+
+The generator expansion and live validation described as the next task below
+are **done**. Full results, run IDs and actual lifecycle timestamps are in
+[LAB-DEMO-RESULTS.md](./LAB-DEMO-RESULTS.md).
+
+Validated end to end against the lab appliance, each through to `RESOLVED`:
+spike (`VOLUME_SPIKE`), drop (`VOLUME_DROP`), multi-source isolation across
+QRadar log sources 227/262/263, and silence (`NO_EVENTS`). Contributor evidence
+was collected from real Ariel queries, and the four frontend routes render the
+live results.
+
+Live validation found five defects that the mock-provider suite had missed,
+each fixed with a regression test that fails without the fix:
+
+| Commit | Defect |
+|---|---|
+| `dc9aa34` | Ariel searches carried no time range, so any query for a past interval silently returned zero — metrics recorded backlog as "no events", and contributor evidence came back empty rather than unavailable. |
+| `404bc39` | Truncated dimensions rendered new/disappeared counts as definitive findings. |
+| `ec5d352` | `resolved_at IS NULL` used as the active-incident predicate. |
+| `57ccd19` | A silent source left no metric row, so `NO_EVENTS` was unreachable outside unit tests. |
+| `4892f8e` | Baseline exclusion spans bounded by `resolved_at` deadlocked an open incident's own recovery. |
+
+Production defaults were restored afterwards (`LAB_MODE=false`, source overrides
+cleared, all three services verified) with every live metric, baseline, incident,
+transition and evidence row preserved.
+
 ## Exact next task
 
-**Phase A synthetic telemetry generator expansion and live QRadar validation.**
+**Phase B — WAF endpoint behavior.** Phase A is closed; do not reopen it.
 
-1. Add the eight Phase A scenarios and their flags to
-   `tools/qradar_lab_loggen.py`, leaving the existing 17 untouched.
-2. Transmit synthetic telemetry to the isolated lab appliance at
-   192.168.122.50 — the first live transmission of this workstream.
-3. Validate baseline / spike / investigation / recovery / drop / silence
-   end-to-end against live QRadar, and record the results as live validation
-   distinct from the mock-provider results reported so far.
+Carry forward the operational follow-ups recorded in
+[PHASE-A-SOURCE-VOLUME-ANOMALY.md](./PHASE-A-SOURCE-VOLUME-ANOMALY.md) §11:
+contended watermark advancement (§11.1), the active-incident state invariant
+(§11.2), the local-auth privilege asymmetry (§11.3), the intermittent
+`MissingGreenlet` in `collect_metrics`, and the five frontend dependency
+advisories. None blocks Phase B.

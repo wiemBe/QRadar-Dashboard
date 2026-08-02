@@ -7,10 +7,11 @@ scheduled security searches, offenses, analytics-rule health and MITRE ATT&CK de
 and it operates strictly **read-only** against QRadar.
 
 > **Status:** Phases 1–3 complete, including a verified live QRadar 7.6.0 FP1 vertical slice.
-> **Phase A** (source-volume behavioral analytics) has its backend and frontend complete and
-> verified end-to-end against a real TimescaleDB using the mock provider. **Phase A has not yet
-> been validated against live QRadar telemetry** — no synthetic events have been transmitted to the
-> appliance, so the seasonal baseline and detectors remain unproven against real event volume. See
+> **Phase A** (source-volume behavioral analytics) is **complete and validated against live QRadar
+> telemetry** (2026-08-02). Spike, drop, multi-source isolation and NO_EVENTS were each observed end
+> to end — synthetic telemetry → ingestion → Ariel aggregation → seasonal baseline → detection →
+> lifecycle → contributor explanation → API → frontend — through to `RESOLVED`. Live validation
+> found and fixed five defects that automated tests had missed. See
 > [Roadmap](#roadmap), [the Phase A design](docs/PHASE-A-SOURCE-VOLUME-ANOMALY.md) and
 > [the Phase 3 handoff](docs/PHASE3-HANDOFF.md).
 

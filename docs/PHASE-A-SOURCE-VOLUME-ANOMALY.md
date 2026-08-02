@@ -3,8 +3,9 @@
 Implementation reference for the first behavioral detector. Concepts and the
 long-term roadmap live in [BEHAVIORAL-ANALYTICS-ARCHITECTURE.md](./BEHAVIORAL-ANALYTICS-ARCHITECTURE.md).
 
-Status: **backend complete and gated.** Frontend, generator scenarios and live
-QRadar validation are the remaining work — see §10.
+Status: **complete and live-validated.** Spike, drop, multi-source isolation and
+NO_EVENTS have all been observed end to end against a real QRadar appliance —
+see §11 and `docs/LAB-DEMO-RESULTS.md`.
 
 ---
 
@@ -319,20 +320,39 @@ guards, lifecycle, Ariel dimension aggregation, explanation analysis and
 persistence, Celery task, beat wiring, API, the `detection` projection, the four
 frontend routes, and tests on both sides.
 
-Gates: Ruff clean · Mypy 31 errors in 18 files (baseline 32/18 — no new errors) ·
-**1078 backend tests passed, 0 failed, 0 skipped** · **275 frontend tests
-passed** · frontend lint, typecheck and production build clean · `alembic
-upgrade head` + `alembic check` clean on a fresh database at revision `0004` ·
-full Compose stack healthy.
+Gates (2026-08-02, after live validation): Ruff clean · Mypy 31 errors in 18
+files (unchanged baseline — no new errors) · **1162 backend tests passed, 0
+failed** (852 unit + 310 integration) · **280 frontend tests passed** · frontend
+lint, typecheck and production build clean · `alembic upgrade head` +
+`alembic check` clean at revision `0004` · full Compose stack healthy.
 
-**Remaining:**
+**Live validation is complete.** Spike, drop, multi-source isolation and
+NO_EVENTS all passed against the real appliance; see `docs/LAB-DEMO-RESULTS.md`
+for run IDs, actual lifecycle timestamps and evidence limitations.
 
-1. **Generator scenarios** — the eight Phase A scenarios and their flags in
-   `tools/qradar_lab_loggen.py`.
-2. **Live QRadar validation** — baseline / spike / investigation / recovery /
-   drop / silence against the isolated lab. In progress; see
-   `docs/LAB-DEMO-RESULTS.md` for verified live facts.
-3. **Watermark advancement is last-write-wins.** See below.
+Live validation found and fixed four defects that automated tests had missed,
+each with regression coverage that fails without the fix:
+
+| Commit | Defect |
+|---|---|
+| `dc9aa34` | Ariel metric and contributor searches carried no time range, so any query for a past interval silently returned zero. |
+| `404bc39` | Truncated dimensions rendered new/disappeared counts as definitive findings. |
+| `ec5d352` | `resolved_at IS NULL` used as the active-incident predicate. |
+| `57ccd19` | Silence left no metric row at all, making NO_EVENTS unreachable in production. |
+| `4892f8e` | Baseline exclusion spans bounded by `resolved_at`, deadlocking an open incident's own recovery. |
+
+Three of these share one root cause: reading `resolved_at` as a lifecycle
+signal. See §11.2.
+
+**Remaining follow-ups (none blocking):**
+
+1. **Watermark advancement is last-write-wins.** See §11.1.
+2. **Active-incident predicates** — see §11.2 for the invariant to preserve.
+3. **Intermittent `MissingGreenlet` in `collect_metrics`** — a connection-pool
+   ping outside greenlet context. Self-heals, because the watermark only
+   advances on success, but it burns a collection cycle. Seen 3 times on
+   2026-08-02.
+4. **Local-development auth privilege asymmetry** — see §11.3.
 
 ### 11.1 Follow-up: contended watermark advancement
 
@@ -360,3 +380,30 @@ Until one exists, a watermark must never be reset while collection tasks are
 active. The required manual procedure is: pause the Beat schedule or worker
 consumption, wait for in-flight collection to drain, perform the reset, resume
 collection, then verify the next window starts where expected.
+
+### 11.2 Invariant: an active incident is defined by state
+
+An incident is active while its state is `CANDIDATE`, `OPEN` or `RECOVERING` —
+the `ACTIVE_ANOMALY_STATES` set. **`resolved_at IS NULL` is not a valid test.**
+
+A `CANDIDATE` that returns to normal before opening never opened, so it was
+never resolved: it ends in state `NORMAL` with `resolved_at` NULL permanently.
+That shape is correct and expected, and was observed live on 2026-08-02 on
+source 227 after an idle gap between scenarios.
+
+Reading `resolved_at` as a lifecycle signal caused three separate live defects:
+inflated active counts (`ec5d352`), and baseline exclusion spans that never
+closed, which deadlocked an open incident's own recovery (`4892f8e`). When
+adding any query that asks "is this incident live?", use the state set.
+
+### 11.3 Follow-up: local-development auth privilege asymmetry
+
+With `AUTH_PROVIDER=local` in a non-production environment, a request with **no**
+bearer token resolves to an `admin:*` principal, while a request carrying an
+arbitrary bearer value resolves to `read:*`. An unauthenticated caller is
+therefore *more* privileged than a token-bearing one.
+
+This is refused outright when `is_production` is true, and it did not affect
+Phase A validation — the live API checks deliberately used the bearer path, the
+less privileged of the two. It must nonetheless be reviewed before any
+non-development deployment.
