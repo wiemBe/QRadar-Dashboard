@@ -35,5 +35,11 @@ logs/
 *.log
 postgres_data/
 
+# Lab generator output. Run manifests and captured event files describe one
+# operator's run and grow without bound; sanitized excerpts belong in
+# docs/LAB-DEMO-RESULTS.md, and small fixtures live under backend/tests.
+lab-runs/
+*.summary.json
+
 # Host-specific compose overlay (libvirt/macvlan layout of one machine).
 docker-compose.override.yml
