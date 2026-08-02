@@ -331,6 +331,45 @@ volume detectors do not care, but `UNKNOWN_EVENT_SPIKE` will notice):
 | `IPS_SIGNATURE_ALERT` | Intrusion Signature Alert | IPS |
 | `IPS_SIGNATURE_DROP` | Intrusion Signature Drop | IPS |
 
+#### pfSense filterlog format
+
+`--format pfsense` renders the firewall sources as pfSense `filterlog` lines, which the **Netgate
+pfSense** DSM parses natively. This is what the lab's `LAB Phase A Firewall` source (QRadar ID 227)
+actually uses:
+
+```text
+<134>Aug 02 12:47:22 lab-fw-volume-01 filterlog[41231]: 5,,,1000000005,em0,match,pass,in,4,0x0,,112,15431,0,DF,6,tcp,72,203.0.113.50,10.10.10.21,30097,443,922,SA,6896606,6896607,64240,,mss;nop;wscale;sackOK;TS
+```
+
+Field order is the documented IPv4/TCP layout: rule, sub-rule, anchor, tracker, interface, reason,
+action, direction, IP version, then the IPv4 header block (TOS, ECN, TTL, id, offset, flags,
+protocol id, protocol text, length, source, destination), then the TCP block (source port,
+destination port, data length, flags, sequence, ack, window, urgent, options).
+
+What QRadar extracts without any custom property:
+
+| QRadar property | Source |
+|---|---|
+| Source IP / Destination IP | filterlog fields 19 / 20 |
+| Source Port / Destination Port | fields 21 / 22 |
+| Protocol | field 17 (`tcp`) |
+| Event name / QID / Category | the `pass`/`block` action → `Firewall - Permit` (qid 114500044, cat 4002) or `Firewall - Deny` (qid 114500042, cat 4003) |
+
+Every Phase A explanation dimension is therefore a native property, which is a better position than
+Universal LEEF would have given.
+
+The trade-off: **filterlog has no field for a run identifier**, so `runId` and `scenario` are not
+carried in the payload. The generator phase rides on the matched rule number instead — `5` baseline,
+`6` anomaly, `7` recovery, each with tracker `1000000000 + rule` — and run correlation is by log
+source plus the phase windows recorded in the run manifest. Verify a run by time window and log
+source, not by text-searching a run ID.
+
+`--format pfsense` is rejected for the WAF and IPS sources and for the content recipe scenarios: a
+filterlog line from a web application firewall would be a lie the DSM would happily parse.
+
+⚠️ Text-searching a run ID in Ariel also matches SIM Audit's record of *your own* search. Always
+group by log source rather than trusting a raw count.
+
 #### Vendor format
 
 `--format vendor` keeps a parser-testing shape instead, for a separately-created log source with a
@@ -371,9 +410,10 @@ python tools/qradar_lab_loggen.py --scenario baseline-spike-recovery \
   --run-id labrun-preview --seed 42 --dry-run --stdout \
   --baseline-duration 60 --anomaly-duration 30 --recovery-duration 30
 
-# The 2 -> 6 -> 2 EPS acceptance run (see the live checklist below for durations)
+# The 2 -> 6 -> 2 EPS acceptance run (see the live checklist below for durations).
+# Start it just after a clock hour so the whole run fills one baseline cell.
 python tools/qradar_lab_loggen.py --scenario baseline-spike-recovery \
-  --target 192.168.122.50 --port 514 --protocol udp --format leef \
+  --target 192.168.122.50 --port 514 --protocol udp --format pfsense \
   --run-id labrun-a1 --seed 42 \
   --baseline-eps 2 --baseline-duration 420 \
   --anomaly-multiplier 3 --anomaly-duration 240 \
@@ -386,7 +426,7 @@ python tools/qradar_lab_loggen.py --scenario baseline-spike-recovery \
 | `--scenario` | One of the eight names above (or a content recipe) |
 | `--run-id` | Stable identifier stamped on every event; defaults to `labrun-<UTC timestamp>` |
 | `--seed` | Reproduces field selection exactly; timestamps still follow the wall clock |
-| `--format` | `leef` (default) or `vendor` |
+| `--format` | `leef` (default), `pfsense` (firewall sources only) or `vendor` |
 | `--baseline-eps` | Baseline rate per source; default 2, or 5 for drop scenarios |
 | `--baseline-duration` | Seconds of baseline; default 360 |
 | `--anomaly-eps` | Absolute anomaly rate; wins over `--anomaly-multiplier` |
@@ -421,13 +461,16 @@ manifest records exactly how many events were lost.
 Create these by hand in the console; the application never creates or modifies a log source through
 the API.
 
-| Display name | Log source identifier | Type | Protocol |
-|---|---|---|---|
-| LAB Phase A Firewall | `lab-fw-volume-01` | Universal LEEF | Syslog UDP/514 |
-| LAB Phase A Firewall 2 | `lab-fw-volume-02` | Universal LEEF | Syslog UDP/514 |
-| LAB Phase A Firewall 3 | `lab-fw-volume-03` | Universal LEEF | Syslog UDP/514 |
-| LAB Phase A WAF | `lab-waf-volume-01` | Universal LEEF | Syslog UDP/514 |
-| LAB Phase A IPS | `lab-ips-volume-01` | Universal LEEF | Syslog UDP/514 |
+| Display name | Log source identifier | Type | Generator format | Protocol |
+|---|---|---|---|---|
+| LAB Phase A Firewall | `lab-fw-volume-01` | Netgate pfSense | `--format pfsense` | Syslog UDP/514 |
+| LAB Phase A Firewall 2 | `lab-fw-volume-02` | Netgate pfSense | `--format pfsense` | Syslog UDP/514 |
+| LAB Phase A Firewall 3 | `lab-fw-volume-03` | Netgate pfSense | `--format pfsense` | Syslog UDP/514 |
+| LAB Phase A WAF | `lab-waf-volume-01` | Universal LEEF | `--format leef` | Syslog UDP/514 |
+| LAB Phase A IPS | `lab-ips-volume-01` | Universal LEEF | `--format leef` | Syslog UDP/514 |
+
+The firewall sources use the pfSense DSM (see the filterlog section above); the format must match
+the type or events fall through to SIM Generic Log DSM as `Unknown log event`.
 
 Only `lab-fw-volume-01` is required for the first ingestion smoke test. The multi-source acceptance
 test needs `lab-fw-volume-02` and `-03` as well, and the silence test needs `lab-fw-volume-02`.
