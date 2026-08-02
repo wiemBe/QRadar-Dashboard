@@ -310,6 +310,111 @@ td.num {
   line-height: var(--lh-base);
 }
 
+/* Secondary counts, as one strip rather than a second row of cards. Present
+   and readable, but plainly subordinate to the four primary metrics. */
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-6);
+  margin: var(--sp-5) 0 0;
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+.status-strip > div {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.status-strip dt {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.status-strip dd {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+.crit-text {
+  color: var(--crit-text);
+}
+
+/* --- source health distribution -------------------------------------------
+   One stacked bar showing proportion, plus the same figures as a text list.
+   The bar is decoration over data that is fully present without it. */
+.health-bar {
+  display: flex;
+  height: 10px;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  background: var(--surface-2);
+  gap: 2px;
+}
+.health-seg {
+  display: block;
+  min-width: 4px;
+  background: var(--neutral);
+}
+.health-seg.crit {
+  background: var(--crit);
+}
+.health-seg.warn {
+  background: var(--warn);
+}
+.health-seg.ok {
+  background: var(--ok);
+}
+.health-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5);
+  list-style: none;
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  font-size: var(--fs-sm);
+}
+.health-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--neutral);
+  flex: none;
+}
+.health-dot.crit {
+  background: var(--crit);
+}
+.health-dot.warn {
+  background: var(--warn);
+}
+.health-dot.ok {
+  background: var(--ok);
+}
+.health-count {
+  font-weight: var(--fw-semibold);
+}
+
+/* Sortable column headers are links, so they are keyboard-operable without
+   any script. */
+.sort-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: inherit;
+}
+.sort-link:hover {
+  color: var(--text);
+}
+th[aria-sort="ascending"] .sort-link,
+th[aria-sort="descending"] .sort-link {
+  color: var(--text);
+}
+
 /* --- status badges ---------------------------------------------------------
    Text is always present, so colour is never the sole carrier of status. */
 
@@ -366,6 +471,22 @@ td.num {
   overflow-x: auto;
   /* Keeps the focus ring of a focused link in the last column visible. */
   padding-bottom: 2px;
+  /* A shadow that appears only at an edge that has content beyond it, so a
+     table that does scroll says so rather than looking merely cut off. The
+     first two layers are the canvas-coloured covers, the last two the
+     shadows they uncover as the content scrolls away. */
+  background:
+    linear-gradient(to right, var(--canvas) 30%, transparent) left center,
+    linear-gradient(to left, var(--canvas) 30%, transparent) right center,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.5), transparent) left center,
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.5), transparent) right center;
+  background-repeat: no-repeat;
+  background-size:
+    32px 100%,
+    32px 100%,
+    14px 100%,
+    14px 100%;
+  background-attachment: local, local, scroll, scroll;
 }
 
 table {
@@ -633,6 +754,13 @@ pre {
   }
   .main {
     padding: var(--sp-6);
+  }
+  /* Tighter cells rather than smaller text: the type scale has a floor, and
+     dropping below it to win horizontal space trades one usability problem
+     for a worse one. */
+  th,
+  td {
+    padding: var(--sp-2) var(--sp-3);
   }
 }
 

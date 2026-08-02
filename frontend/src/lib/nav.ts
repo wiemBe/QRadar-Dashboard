@@ -28,6 +28,10 @@ export const NAV: NavGroup[] = [
     items: [
       { href: "/behavior", label: "Overview" },
       { href: "/anomalies", label: "Anomalies" },
+      // Listed after /behavior, and resolved by longest match rather than by
+      // order: /behavior/sources and /behavior/sources/{id} belong to Sources,
+      // not to the Overview whose path is their prefix.
+      { href: "/behavior/sources", label: "Sources" },
     ],
   },
   {
