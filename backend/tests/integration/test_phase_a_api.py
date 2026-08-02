@@ -150,6 +150,30 @@ async def _seed(session) -> dict:
         policy_version=1,
         evidence_status=EvidenceStatus.PARTIAL,
         explanation="average EPS 6.00 is above the baseline median 2.00",
+        # Shaped exactly as the volume detector writes it, including the nested
+        # `extra` facts, so the detection projection is exercised against the
+        # real payload rather than a convenient one.
+        details={
+            "reason": "average EPS 6.00 is above the baseline median 2.00",
+            "baseline_low": 1.7,
+            "baseline_high": 2.3,
+            "threshold": 3.5,
+            "sample_count": 30,
+            "signal": "ANOMALOUS",
+            "extra": {
+                "observed_eps": 6.0,
+                "expected_eps": 2.0,
+                "observed_events": 1800.0,
+                "expected_events": 600.0,
+                "absolute_delta_events": 1200.0,
+                "bucket_seconds": 300.0,
+                "baseline_completeness": 0.9,
+                "baseline_version": 2,
+                "ratio": 3.0,
+                "robust_score_status": "OK",
+                "robust_z": 13.5,
+            },
+        },
     )
     session.add(anomaly)
     await session.flush()
@@ -206,7 +230,7 @@ async def _seed(session) -> dict:
         )
     )
     await session.commit()
-    return {"source_id": src.id, "anomaly_id": anomaly.id}
+    return {"source_id": src.id, "anomaly_id": anomaly.id, "instance_id": inst.id}
 
 
 @pytest.fixture
@@ -300,6 +324,46 @@ class TestAnomalyList:
         assert body["items"] == []
         assert body["total"] == 1
 
+    def test_filters_by_evidence_status(self, seeded) -> None:
+        c = client_for(READER)
+        assert c.get("/api/v1/anomalies?evidence_status=PARTIAL").json()["total"] == 1
+        assert c.get("/api/v1/anomalies?evidence_status=COMPLETE").json()["total"] == 0
+
+    def test_filters_by_instance(self, seeded) -> None:
+        """Anomalies inherit their instance from the source they belong to."""
+        c = client_for(READER)
+        iid = seeded["instance_id"]
+        assert c.get(f"/api/v1/anomalies?instance_id={iid}").json()["total"] == 1
+        assert c.get(f"/api/v1/anomalies?instance_id={uuid.uuid4()}").json()["total"] == 0
+
+    def test_items_carry_the_source_name(self, seeded) -> None:
+        """The list renders a name per row; resolving it client-side would mean
+        one request per row against an endpoint the list already paginates."""
+        item = client_for(READER).get("/api/v1/anomalies").json()["items"][0]
+        assert item["log_source_name"] == "LAB Firewall"
+
+    def test_duration_is_serialized_not_left_to_the_client(self, seeded) -> None:
+        item = client_for(READER).get("/api/v1/anomalies").json()["items"][0]
+        assert item["duration_seconds"] == 300.0
+
+    def test_a_still_running_anomaly_reports_no_duration(self, seeded) -> None:
+        """No end yet means no duration. Substituting `now` would report a
+        number that grows on every page refresh as if the incident were
+        measured, so the field stays null until an end exists."""
+        from app.schemas.anomaly import AnomalyListItem as Item
+
+        item = Item(
+            id=uuid.uuid4(),
+            log_source_id=uuid.uuid4(),
+            anomaly_type=AnomalyType.VOLUME_SPIKE,
+            state=AnomalyState.OPEN,
+            severity=Severity.HIGH,
+            detected_at=NOW,
+            anomaly_start=NOW,
+            evidence_status=EvidenceStatus.NOT_REQUESTED,
+        )
+        assert item.model_dump()["duration_seconds"] is None
+
 
 class TestRangeBounds:
     def test_inverted_range_is_rejected(self, seeded) -> None:
@@ -371,6 +435,32 @@ class TestInvestigationDetail:
         r = client_for(READER).get(f"/api/v1/anomalies/{uuid.uuid4()}")
         assert r.status_code == 404
 
+    def test_detection_block_exposes_the_detector_reasoning(self, seeded) -> None:
+        """The investigation page must state which thresholds were applied.
+        Without them the verdict is an assertion the analyst cannot check."""
+        body = client_for(READER).get(
+            f"/api/v1/anomalies/{seeded['anomaly_id']}"
+        ).json()
+        det = body["detection"]
+        assert det["expected_low"] == 1.7
+        assert det["expected_high"] == 2.3
+        assert det["threshold"] == 3.5
+        assert det["baseline_sample_count"] == 30
+        assert det["baseline_completeness"] == 0.9
+        assert det["ratio"] == 3.0
+        assert det["robust_score_status"] == "OK"
+        assert det["robust_z"] == 13.5
+        assert det["absolute_delta_events"] == 1200.0
+
+    def test_detection_block_forwards_no_unlisted_key(self, seeded) -> None:
+        """The evidence column is a detector-owned payload. Publishing it
+        wholesale would make every future internal fact a public API field."""
+        body = client_for(READER).get(
+            f"/api/v1/anomalies/{seeded['anomaly_id']}"
+        ).json()
+        # `signal` is present in the stored dict and deliberately not projected.
+        assert "signal" not in body["detection"]
+
 
 class TestSourceBehavior:
     def test_observed_and_expected_are_reported_together(self, seeded) -> None:
@@ -421,6 +511,15 @@ class TestSummary:
         body = client_for(READER).get("/api/v1/anomalies/summary").json()
         assert body["highest_deviation"]
         assert body["highest_deviation"][0]["deviation_ratio"] == 3.0
+        # The overview links each row to its source, so the name travels with it.
+        assert body["highest_deviation"][0]["log_source_name"] == "LAB Firewall"
+
+    def test_evidence_backlog_and_failures_are_counted_apart(self, seeded) -> None:
+        """A queued explanation job and a failed one both leave the
+        investigation page empty; only the counts distinguish them."""
+        body = client_for(READER).get("/api/v1/anomalies/summary").json()
+        assert body["evidence_pending"] == 0
+        assert body["evidence_failed"] == 0
 
 
 class TestNoSecretsLeak:

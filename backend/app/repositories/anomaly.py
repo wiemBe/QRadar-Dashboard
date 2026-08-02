@@ -17,6 +17,7 @@ from app.models.enums import (
     ACTIVE_ANOMALY_STATES,
     AnomalyState,
     AnomalyType,
+    EvidenceStatus,
     Severity,
 )
 from app.models.explanation import AnomalyExplanation
@@ -37,9 +38,11 @@ class AnomalyRepository:
         self,
         *,
         log_source_id: uuid.UUID | None = None,
+        instance_id: uuid.UUID | None = None,
         anomaly_type: AnomalyType | None = None,
         state: AnomalyState | None = None,
         severity: Severity | None = None,
+        evidence_status: EvidenceStatus | None = None,
         active_only: bool = False,
         since: datetime | None = None,
         until: datetime | None = None,
@@ -47,12 +50,23 @@ class AnomalyRepository:
         stmt = select(LogSourceAnomaly)
         if log_source_id is not None:
             stmt = stmt.where(LogSourceAnomaly.log_source_id == log_source_id)
+        if instance_id is not None:
+            # Anomalies carry no instance of their own; they inherit it from the
+            # source, so this is a subquery rather than a join to keep the
+            # count query above from double-counting.
+            stmt = stmt.where(
+                LogSourceAnomaly.log_source_id.in_(
+                    select(LogSource.id).where(LogSource.instance_id == instance_id)
+                )
+            )
         if anomaly_type is not None:
             stmt = stmt.where(LogSourceAnomaly.anomaly_type == anomaly_type)
         if state is not None:
             stmt = stmt.where(LogSourceAnomaly.state == state)
         if severity is not None:
             stmt = stmt.where(LogSourceAnomaly.severity == severity)
+        if evidence_status is not None:
+            stmt = stmt.where(LogSourceAnomaly.evidence_status == evidence_status)
         if active_only:
             stmt = stmt.where(
                 LogSourceAnomaly.state.in_([s.value for s in ACTIVE_ANOMALY_STATES])
@@ -102,7 +116,33 @@ class AnomalyRepository:
             )
         )
 
+    async def source_names(
+        self, anomalies: list[LogSourceAnomaly]
+    ) -> dict[uuid.UUID, str]:
+        """Resolve source names for a page of anomalies in one query.
+
+        One statement for the whole page rather than a relationship load per
+        row: the list view renders names for every row, and lazy loading them
+        on an async session that forbids implicit IO would fail outright.
+        """
+        ids = {a.log_source_id for a in anomalies}
+        if not ids:
+            return {}
+        rows = await self.session.execute(
+            select(LogSource.id, LogSource.name).where(LogSource.id.in_(ids))
+        )
+        return dict(rows.all())  # type: ignore[arg-type]
+
     # --------------------------------------------------------------- summary
+    async def evidence_counts(self) -> dict[str, int]:
+        """Explanation-package counts keyed by evidence status."""
+        rows = await self.session.execute(
+            select(LogSourceAnomaly.evidence_status, func.count()).group_by(
+                LogSourceAnomaly.evidence_status
+            )
+        )
+        return {str(status): int(count) for status, count in rows.all()}
+
     async def state_counts(self) -> dict[tuple[str, str], int]:
         """Anomaly counts keyed by (state, anomaly_type)."""
         rows = await self.session.execute(

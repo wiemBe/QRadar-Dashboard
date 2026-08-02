@@ -18,8 +18,8 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import SessionDep, SettingsDep
-from app.models.enums import AnomalyState, AnomalyType, Severity
-from app.models.log_source import LogSource
+from app.models.enums import AnomalyState, AnomalyType, EvidenceStatus, Severity
+from app.models.log_source import LogSource, LogSourceAnomaly
 from app.repositories.anomaly import AnomalyRepository
 from app.schemas.anomaly import (
     AnomalyDetailOut,
@@ -33,6 +33,7 @@ from app.schemas.anomaly import (
     MetricBucketOut,
     PagedAnomalies,
     SourceBehaviorOut,
+    detection_detail,
 )
 
 router = APIRouter(prefix="/anomalies", tags=["anomalies"])
@@ -72,9 +73,11 @@ async def list_anomalies(
     session: SessionDep,
     settings: SettingsDep,
     log_source_id: uuid.UUID | None = Query(default=None),
+    instance_id: uuid.UUID | None = Query(default=None),
     anomaly_type: AnomalyType | None = Query(default=None),
     state: AnomalyState | None = Query(default=None),
     severity: Severity | None = Query(default=None),
+    evidence_status: EvidenceStatus | None = Query(default=None),
     active_only: bool = Query(default=False),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -87,25 +90,41 @@ async def list_anomalies(
         limit=min(limit, settings.api_max_page_size),
         offset=offset,
         log_source_id=log_source_id,
+        instance_id=instance_id,
         anomaly_type=anomaly_type,
         state=state,
         severity=severity,
+        evidence_status=evidence_status,
         active_only=active_only,
         since=start,
         until=end,
     )
     return PagedAnomalies(
-        items=[AnomalyListItem.model_validate(r) for r in rows],
+        items=await _list_items(repo, rows),
         total=total,
         limit=limit,
         offset=offset,
     )
 
 
+async def _list_items(
+    repo: AnomalyRepository, rows: list[LogSourceAnomaly]
+) -> list[AnomalyListItem]:
+    """Anomaly rows with their source names resolved in a single query."""
+    names = await repo.source_names(rows)
+    items = []
+    for row in rows:
+        item = AnomalyListItem.model_validate(row)
+        item.log_source_name = names.get(row.log_source_id)
+        items.append(item)
+    return items
+
+
 @router.get("/summary", response_model=BehaviorSummaryOut)
 async def anomaly_summary(session: SessionDep) -> BehaviorSummaryOut:
     repo = AnomalyRepository(session)
     counts = await repo.state_counts()
+    evidence = await repo.evidence_counts()
     sources = await repo.monitored_sources()
 
     def total(state: AnomalyState, atype: AnomalyType | None = None) -> int:
@@ -139,12 +158,10 @@ async def anomaly_summary(session: SessionDep) -> BehaviorSummaryOut:
         recovering=total(AnomalyState.RECOVERING),
         insufficient_data_sources=insufficient,
         monitored_sources=len(sources),
-        recently_resolved=[
-            AnomalyListItem.model_validate(a) for a in await repo.recently_resolved()
-        ],
-        highest_deviation=[
-            AnomalyListItem.model_validate(a) for a in await repo.highest_deviation()
-        ],
+        evidence_pending=evidence.get(EvidenceStatus.PENDING.value, 0),
+        evidence_failed=evidence.get(EvidenceStatus.FAILED.value, 0),
+        recently_resolved=await _list_items(repo, await repo.recently_resolved()),
+        highest_deviation=await _list_items(repo, await repo.highest_deviation()),
     )
 
 
@@ -162,6 +179,7 @@ async def get_anomaly(anomaly_id: uuid.UUID, session: SessionDep) -> AnomalyDeta
         AnomalyTransitionOut.model_validate(t) for t in anomaly.transitions
     ]
     detail.explanation_package = _explanation_out(anomaly.explanation_package)
+    detail.detection = detection_detail(anomaly.details)
     return detail
 
 
