@@ -1,11 +1,12 @@
 import "./globals.css";
 import type { Metadata } from "next";
-import { SECTIONS } from "@/lib/sections";
+
+import { AppNav } from "@/components/shell/AppNav";
 
 export const metadata: Metadata = {
   title: {
-    default: "QRadar Behavioral Anomaly and Investigation Platform",
-    template: "%s · QRadar Behavioral Analytics",
+    default: "Behavior Analytics",
+    template: "%s · Behavior Analytics",
   },
   description:
     "Behavioral anomaly detection and investigation for on-premises QRadar: " +
@@ -14,24 +15,22 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  // Detail routes are reached from their parent list, not the nav.
-  const nav = SECTIONS.filter((s) => !s.slug.includes("/"));
   return (
     <html lang="en">
       <body>
         <div className="layout">
           <aside className="sidebar">
-            <h1>QRadar Behavioral Analytics</h1>
-            <nav>
-              {nav.map((s) => (
-                <a key={s.slug} href={`/${s.slug}`}>
-                  <span>{s.label}</span>
-                  {!s.live && <span className="badge">P{s.phase}</span>}
-                </a>
-              ))}
-            </nav>
+            {/* The brand is a link, not a heading: each page's own title is the
+                document's <h1>, and the shell must not take that level. */}
+            <a href="/behavior" className="brand plain">
+              <span className="brand-name">Behavior Analytics</span>
+              <span className="brand-sub">QRadar Anomaly &amp; Investigation</span>
+            </a>
+            <AppNav />
           </aside>
-          <main className="main">{children}</main>
+          <main className="main" id="content">
+            <div className="page">{children}</div>
+          </main>
         </div>
       </body>
     </html>

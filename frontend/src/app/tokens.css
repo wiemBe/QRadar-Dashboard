@@ -1,0 +1,139 @@
+/* Design tokens for the behavioral analytics platform.
+ *
+ * Every colour, space, radius and type size used by the Phase A surfaces is
+ * declared here so that a value can be reasoned about once rather than being
+ * rediscovered as a literal in twenty components.
+ *
+ * Two rules govern the palette:
+ *
+ *   1. Status colour is reserved for status. Red, amber and green never
+ *      decorate a border, a heading or a chart gridline, because an analyst
+ *      who learns that red means "critical" must not then meet a red that
+ *      means "this is a table".
+ *
+ *   2. Every status has a *text* tint distinct from its base hue. The base
+ *      hues are calibrated for 2 px marks and chart strokes; used as small
+ *      text on a panel they sit near the contrast floor, so text uses the
+ *      lighter tint and the base stays for the mark beside it.
+ */
+
+:root {
+  /* --- background layers -------------------------------------------------
+     Four steps, deepest first. `canvas` is the page, `surface` is a panel on
+     it, `surface-2` is an inset inside a panel, `surface-3` is a hover. */
+  --canvas: #0a0e17;
+  --surface: #111726;
+  --surface-2: #182034;
+  --surface-3: #1e2740;
+
+  /* --- borders -----------------------------------------------------------
+     `border` is the default hairline; `border-strong` is for a boundary that
+     must survive next to a filled surface, such as a focused input. */
+  --border: #232c42;
+  --border-strong: #33405e;
+
+  /* --- text hierarchy ----------------------------------------------------
+     Three levels only. A fourth invites unreadable text: `text-3` is already
+     the floor at which 12 px stays legible on `--surface`. */
+  --text: #e8eef8;
+  --text-2: #a8b4c9;
+  --text-3: #7c8aa3;
+
+  /* --- status ------------------------------------------------------------
+     Semantics, fixed across the product:
+       crit    open incident, failed collection
+       warn    candidate, recovering, partial, truncated
+       ok      normal, resolved, complete
+       info    informational accent, the observed series, links
+       neutral unavailable, insufficient data, not requested — states that are
+               neither good nor bad news and must never be coloured as either. */
+  --crit: #f85149;
+  --crit-text: #ff9d97;
+  --crit-bg: rgba(248, 81, 73, 0.12);
+  --crit-border: rgba(248, 81, 73, 0.34);
+
+  --warn: #d29922;
+  --warn-text: #e3b341;
+  --warn-bg: rgba(210, 153, 34, 0.12);
+  --warn-border: rgba(210, 153, 34, 0.34);
+
+  --ok: #3fb950;
+  --ok-text: #56d364;
+  --ok-bg: rgba(63, 185, 80, 0.12);
+  --ok-border: rgba(63, 185, 80, 0.32);
+
+  --info: #4f8cff;
+  --info-text: #79a8ff;
+  --info-bg: rgba(79, 140, 255, 0.12);
+  --info-border: rgba(79, 140, 255, 0.34);
+
+  --neutral: #8b98b0;
+  --neutral-text: #a8b4c9;
+  --neutral-bg: rgba(139, 152, 176, 0.1);
+  --neutral-border: rgba(139, 152, 176, 0.28);
+
+  /* --- focus -------------------------------------------------------------
+     Deliberately not an accent tint: the focus ring must be visible on top of
+     an accent-coloured control as well as on the canvas. */
+  --focus: #8ab4ff;
+
+  /* --- spacing -----------------------------------------------------------
+     A 4 px scale. `--sp-5` (16 px) is the default gap inside a panel and
+     `--sp-7` (32 px) the gap between semantic sections of a page. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 14px;
+  --sp-5: 16px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 48px;
+
+  /* --- radii -------------------------------------------------------------- */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+
+  /* --- elevation ----------------------------------------------------------
+     One shadow. A hierarchy expressed in shadows reads as a consumer app; on
+     an analytics surface the hierarchy is carried by layer and border. */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+
+  /* --- typography ---------------------------------------------------------
+     No size below 12 px is defined, so none can be used by accident. */
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-md: 16px;
+  --fs-lg: 20px;
+  --fs-xl: 26px;
+  --fs-metric: 28px;
+
+  --lh-tight: 1.25;
+  --lh-base: 1.5;
+  --lh-prose: 1.6;
+
+  /* Three weights. More produces a page where emphasis stops meaning
+     anything, which is the failure this scale exists to prevent. */
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+
+  /* --- layout -------------------------------------------------------------- */
+  --sidebar-w: 232px;
+  --page-max: 1360px;
+  --header-h: 72px;
+
+  /* --- chart --------------------------------------------------------------
+     Consumed by the ECharts option builder so the chart shares the page's
+     palette rather than carrying its own hard-coded one. */
+  --chart-grid: #1a2336;
+  --chart-axis: #2a3350;
+  --chart-label: #8b98b0;
+}
