@@ -444,6 +444,21 @@ Phase A stores aggregate metrics and bounded aggregate evidence only.
 If a field does not exist in the QRadar DSM output for a source, that dimension
 is marked **`UNAVAILABLE`**. It is never rendered as a count of zero.
 
+**Implemented (Phase A).** The investigation page renders each of these six
+states with its operational meaning attached, and renders an `UNAVAILABLE` or
+`FAILED` dimension as its own section rather than omitting it:
+
+> Unavailable — this field was not exposed by the QRadar event schema or DSM for
+> the selected interval.
+
+Omission is the failure mode that matters here. Four of the six evidence states
+produce a page with no contributors, which is visually indistinguishable from
+"we looked and nothing stood out"; and a dimension section that simply is not
+there reads to an analyst as one that *was* examined and came back clean. In
+both cases the stated status is the only thing carrying the truth, so it is
+always stated. A dimension's `new_value_count` and `disappeared_value_count`
+default to 0 in storage but render as em dashes when nothing was counted.
+
 ### 8.2 The platform must not invent
 
 Never fabricate usernames, actions, source IPs, ports, categories, event names,
@@ -592,3 +607,9 @@ investigation API                  (authenticated, paginated, range-bounded)
         ▼
 investigation dashboard            ("What changed?")
 ```
+
+**Phase A status:** every stage above is implemented, from metric buckets
+through to the investigation dashboard at `/anomalies/[id]`, and gated by
+automated tests on both sides. The pipeline has **not** yet been exercised
+against live QRadar telemetry — all results to date come from the mock provider
+against a real PostgreSQL/TimescaleDB. Live validation is the next workstream.

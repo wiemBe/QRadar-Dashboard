@@ -213,9 +213,9 @@ All routes are read-only, authenticated behind `read:anomalies` (satisfied by th
 
 | Route | Purpose |
 |---|---|
-| `GET /api/v1/anomalies` | Paged list; filters: `log_source_id`, `anomaly_type`, `state`, `severity`, `active_only`, `since`, `until` |
-| `GET /api/v1/anomalies/summary` | Open/spike/drop/silence counts, insufficient-data sources, recently resolved, highest deviation |
-| `GET /api/v1/anomalies/{id}` | Investigation detail: measurements, lifecycle history, evidence package, contributors by dimension |
+| `GET /api/v1/anomalies` | Paged list; filters: `log_source_id`, `instance_id`, `anomaly_type`, `state`, `severity`, `evidence_status`, `active_only`, `since`, `until` |
+| `GET /api/v1/anomalies/summary` | Open/spike/drop/silence counts, insufficient-data sources, pending/failed evidence, recently resolved, highest deviation |
+| `GET /api/v1/anomalies/{id}` | Investigation detail: measurements, `detection` block, lifecycle history, evidence package, contributors by dimension |
 | `GET /api/v1/behavior/sources` | Observed vs expected EPS, expected band, deviation ratio, state per source |
 | `GET /api/v1/behavior/sources/{id}` | Same, one source |
 | `GET /api/v1/behavior/sources/{id}/metrics` | Bucket history with completeness |
@@ -223,6 +223,28 @@ All routes are read-only, authenticated behind `read:anomalies` (satisfied by th
 
 **No QRadar mutation endpoint exists, and none may be added.** A test asserts
 every route under `/anomalies` and `/behavior` accepts only `GET`/`HEAD`/`OPTIONS`.
+
+List items carry `log_source_name` and a serialized `duration_seconds`. The
+latter is a computed field rather than a plain property so it is actually
+emitted: the still-running case (`anomaly_end` absent) is exactly where an
+independent client reimplementation substitutes `now` and reports a duration
+that grows on every page refresh. It is `null` until an end exists.
+
+### 8.1 The `detection` block
+
+`GET /api/v1/anomalies/{id}` carries a typed `detection` object: the expected
+band, the robust-z threshold that had to be cleared, the baseline sample count
+and completeness, the observed/expected EPS and event counts, the ratio and its
+basis, and the robust-score status with its fallback bound.
+
+Without these the verdict is an assertion the analyst cannot check. They are
+projected from the detector's `details` JSONB by an **explicit whitelist**, not
+serialized wholesale: that column is a detector-owned payload whose keys vary
+per detector, and forwarding it verbatim would make every future internal fact a
+silent, unreviewed addition to a public response. The projection also refuses to
+coerce a bool into a numeric field (`bool` subclasses `int` in Python) and drops
+an unrecognized `robust_score_status` rather than defaulting it to `OK`, so a
+detector bug cannot reach the UI disguised as a measurement.
 
 ## 9. Background tasks
 
@@ -238,23 +260,77 @@ every route under `/anomalies` and `/behavior` accepts only `GET`/`HEAD`/`OPTION
 Explanation collection is deliberately decoupled from detection: an unresponsive
 appliance must delay evidence, never the alert that something is wrong.
 
-## 10. Status and remaining work
+## 10. Frontend
+
+| Route | Purpose |
+|---|---|
+| `/behavior` | Fleet posture, source behavior table, highest deviation, recently resolved |
+| `/behavior/sources/[id]` | One source's observed volume against its seasonal band, with anomaly overlay |
+| `/anomalies` | Filterable, server-paginated list |
+| `/anomalies/[id]` | Investigation detail |
+
+Pages are server components; the API client is the existing `src/lib/api.ts`
+(one `fetch` wrapper, no second request library). Presentation honesty rules
+live in `src/lib/behavior.ts`, series construction in `src/lib/timeseries.ts`,
+and query-parameter validation in `src/lib/anomalyQuery.ts` — each unit-tested
+independently of the pages.
+
+### 10.1 Investigation sections
+
+Detection summary · timeline · lifecycle history · evidence completeness ·
+contributor dimensions · dimension summary · query provenance.
+
+### 10.2 Unavailable dimensions
+
+Rendered explicitly, never hidden:
+
+> Unavailable — this field was not exposed by the QRadar event schema or DSM for
+> the selected interval.
+
+A hidden unavailable dimension reads to an analyst as one that was checked and
+found clean, which inverts the truth. Its `new_value_count` and
+`disappeared_value_count` render as em dashes rather than the backend's default
+zeroes, and the dimension summary names every unchecked dimension in one place
+so the page's coverage is legible at a glance.
+
+### 10.3 Evidence completeness rendering
+
+All six states render with their operational meaning. Four of them —
+`NOT_REQUESTED`, `PENDING`, `UNAVAILABLE`, `FAILED` — produce a page with no
+contributors, visually identical to "we looked and nothing stood out", so the
+stated status is the only thing distinguishing a queued job from a failed one
+from a source whose DSM emits nothing. `COMPLETE` is the only state toned as
+good news; `NOT_REQUESTED` and `UNAVAILABLE` are neutral rather than green.
+
+### 10.4 Zero is not missing
+
+`formatMetric` and its siblings render a measured `0` as `0` and an unmeasured
+`null` as an em dash. In charts, a `PARTIAL` or `MISSING` bucket is plotted as
+`null` with `connectNulls: false`, and an interval with no stored bucket gets an
+explicit null point — a line drawn across an uncollected hour asserts traffic
+nobody observed and turns a collector outage into an apparent source outage. An
+unbaselined source gets no expected line at all, because a flat line at 0 would
+invent an expectation and make any traffic look like a spike against it.
+
+## 11. Status and remaining work
 
 **Done and gated:** models, migration `0004`, baseline extension, detector
 guards, lifecycle, Ariel dimension aggregation, explanation analysis and
-persistence, Celery task, beat wiring, API, tests.
+persistence, Celery task, beat wiring, API, the `detection` projection, the four
+frontend routes, and tests on both sides.
 
 Gates: Ruff clean · Mypy 31 errors in 18 files (baseline 32/18 — no new errors) ·
-**1060 tests passed, 0 failed, 0 skipped** · `alembic upgrade head` + `alembic
-check` clean on a fresh database.
+**1078 backend tests passed, 0 failed, 0 skipped** · **275 frontend tests
+passed** · frontend lint, typecheck and production build clean · `alembic
+upgrade head` + `alembic check` clean on a fresh database at revision `0004` ·
+full Compose stack healthy.
 
 **Remaining:**
 
-1. **Frontend** — behavioral overview, source behavior page with expected band,
-   anomaly list, and the investigation detail page.
-2. **Generator scenarios** — the eight Phase A scenarios and their flags in
+1. **Generator scenarios** — the eight Phase A scenarios and their flags in
    `tools/qradar_lab_loggen.py`.
-3. **Live QRadar validation** — baseline / spike / investigation / recovery /
-   drop / silence against the isolated lab. **Not yet performed.** All results
-   reported so far come from automated tests against the mock provider and a
-   real PostgreSQL/TimescaleDB, not from live QRadar telemetry.
+2. **Live QRadar validation** — baseline / spike / investigation / recovery /
+   drop / silence against the isolated lab. **Not yet performed.** Every result
+   reported so far comes from automated tests against the mock provider and a
+   real PostgreSQL/TimescaleDB, not from live QRadar telemetry. No synthetic
+   events have been transmitted to the appliance.

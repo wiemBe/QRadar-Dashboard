@@ -835,39 +835,65 @@ and [PHASE-A-SOURCE-VOLUME-ANOMALY.md](./PHASE-A-SOURCE-VOLUME-ANOMALY.md).
 | `feat(anomaly): add seasonal source-volume baseline and detectors` | Completeness, conjunctive guards, degenerate-MAD fallback, lifecycle, migration 0004 |
 | `feat(anomaly): add anomaly evidence and contributor analysis` | Bounded Ariel dimension aggregation, contributor arithmetic, typed storage, task, API |
 | `test(anomaly): cover behavioral detection and explanation lifecycle` | 118 new tests |
+| `feat(api): expose detector reasoning and evidence filters for investigation` | Whitelisted `detection` block, `log_source_name`, serialized `duration_seconds`, evidence/instance filters, pending/failed counts |
+| `feat(frontend): add typed Phase A clients and anomaly investigation detail` | Typed clients, honesty helpers, seven-section investigation page, volume chart, rewritten anomaly list |
+| `feat(frontend): add behavioral overview and source behavior views` | `/behavior`, `/behavior/sources/[id]`, navigation and product positioning |
+| `test(frontend): cover Phase A investigation and behavioral states` | 211 new frontend tests |
+| `docs(anomaly): document Phase A frontend operations` | Routes, investigation sections, unavailable-dimension behavior, Compose startup, gates |
 
 ## Not yet done
 
-1. **Frontend.** Behavioral overview, source behavior page, anomaly list, and
-   the investigation detail page. The API they need is complete and tested.
-2. **Generator scenarios.** The eight Phase A scenarios and their flags in
+1. **Generator scenarios.** The eight Phase A scenarios and their flags in
    `tools/qradar_lab_loggen.py`. The existing 17 scenarios are untouched.
-3. **Live QRadar validation.** Not performed.
+2. **Live QRadar validation.** Not performed.
 
 ## Live validation status — explicitly separated
 
-**Automated implementation status:** complete for the backend slice, gated as
-above.
+**Automated implementation status:** complete for the backend *and* frontend
+slices, gated as above. Backend 1078 tests, frontend 275 tests, both suites 0
+failed and 0 skipped; frontend lint, typecheck and production build clean;
+`alembic upgrade head` + `alembic check` clean at revision `0004`; the full
+Compose stack (`postgres`, `redis`, `backend`, `celery-worker`, `celery-beat`,
+`frontend`) healthy with `migrate` exited 0, and every route smoke-tested.
+
+The stack currently holds no log sources, so the behavioral routes render their
+empty states. That is a valid result and no data was fabricated to avoid it.
 
 **Live validation status:** **not started.** Every number reported for Phase A so
 far comes from automated tests against the mock provider and a real
 PostgreSQL/TimescaleDB instance — not from live QRadar telemetry. No synthetic
 events have been sent to 192.168.122.50 in this workstream.
 
-**Blocker:** none technical. The work was cut at a coherent boundary on session
-budget, with the tree clean and all gates green.
+**Blocker:** none technical.
+
+## Frontend operations
+
+Routes, investigation sections, unavailable-dimension behavior and evidence
+rendering are documented in
+[the Phase A design](PHASE-A-SOURCE-VOLUME-ANOMALY.md#10-frontend) and
+[the README](../README.md#frontend-routes).
+
+Two operational notes worth carrying forward:
+
+* **Never run two `pytest` processes against the same test database.** The
+  schema fixture drops and recreates tables, so a concurrent run fails with
+  unrelated collection errors *and* leaves the database in a state where
+  `alembic check` reports spurious drift. Recreate the test database
+  (`make db-test-down && make db-test-up`) before a migration drift check that
+  follows a test run.
+* **`qradar-vmnet` goes stale across Docker daemon restarts.** `docker compose
+  up` then fails with `network id ... not found` even though `docker network ls`
+  shows it. Fix: `docker network rm qradar-vmnet && bash
+  deploy/create-vmnet.sh`.
 
 ## Exact next task
 
-Implement the frontend behavioral experience against the existing API:
+**Phase A synthetic telemetry generator expansion and live QRadar validation.**
 
-1. `/behavior` overview — consume `GET /api/v1/anomalies/summary`.
-2. `/behavior/sources/[id]` — observed vs expected with the p05/p95 band
-   overlaid, from `/behavior/sources/{id}/metrics` and `/baselines`.
-3. `/anomalies` list — from `GET /api/v1/anomalies` with its filters.
-4. `/anomalies/[id]` investigation detail — the highest-priority page. Render
-   the contributor tables per dimension, and render `UNAVAILABLE` dimensions
-   explicitly rather than hiding them; a hidden unavailable dimension is one the
-   operator will assume was clean.
-
-Then the generator scenarios, then live lab validation.
+1. Add the eight Phase A scenarios and their flags to
+   `tools/qradar_lab_loggen.py`, leaving the existing 17 untouched.
+2. Transmit synthetic telemetry to the isolated lab appliance at
+   192.168.122.50 — the first live transmission of this workstream.
+3. Validate baseline / spike / investigation / recovery / drop / silence
+   end-to-end against live QRadar, and record the results as live validation
+   distinct from the mock-provider results reported so far.

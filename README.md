@@ -1,13 +1,18 @@
 # qradar-observability
 
-An **on-premises QRadar observability and SOC analytics platform**. It monitors IBM QRadar SIEM
-health, scheduled security searches, log-source anomalies, offenses, analytics-rule health and
-MITRE ATT&CK detection coverage — and it operates strictly **read-only** against QRadar.
+An **on-premises QRadar behavioral anomaly and investigation platform**. It baselines what every
+log source normally does, detects when that changes, and answers *what changed during the anomalous
+interval* with bounded, auditable evidence. Around that it also monitors IBM QRadar SIEM health,
+scheduled security searches, offenses, analytics-rule health and MITRE ATT&CK detection coverage —
+and it operates strictly **read-only** against QRadar.
 
-> **Status:** Phases 1–3 complete, including a verified live QRadar 7.6.0 FP1 vertical slice:
-> REST/Ariel collection, PostgreSQL persistence, Celery scheduling, guarded APIs, and offense,
-> rule-health, and detection-coverage dashboards. Phase 4 remains out of scope. See
-> [Roadmap](#roadmap) and [the Phase 3 handoff](docs/PHASE3-HANDOFF.md).
+> **Status:** Phases 1–3 complete, including a verified live QRadar 7.6.0 FP1 vertical slice.
+> **Phase A** (source-volume behavioral analytics) has its backend and frontend complete and
+> verified end-to-end against a real TimescaleDB using the mock provider. **Phase A has not yet
+> been validated against live QRadar telemetry** — no synthetic events have been transmitted to the
+> appliance, so the seasonal baseline and detectors remain unproven against real event volume. See
+> [Roadmap](#roadmap), [the Phase A design](docs/PHASE-A-SOURCE-VOLUME-ANOMALY.md) and
+> [the Phase 3 handoff](docs/PHASE3-HANDOFF.md).
 
 Phase 3.5 adds an opt-in, manual synthetic-telemetry lab without changing the read-only QRadar
 application contract. See [the lab guide](docs/LAB-SYNTHETIC-TELEMETRY.md) and
@@ -24,6 +29,7 @@ Celery, Beat, Compose, or normal tests.
 - [Provider abstraction](#provider-abstraction)
 - [Security model](#security-model)
 - [Installation](#installation)
+- [Frontend routes](#frontend-routes)
 - [Development](#development)
 - [Testing](#testing)
 - [Data model](#data-model)
@@ -411,6 +417,71 @@ docker compose --profile mcp up -d qradar-mcp
 
 The MCP container has no host ports; only the backend reaches it.
 
+## Frontend routes
+
+Behavioral analytics leads the navigation because it is what the platform is for; the Phase 3
+inventory surfaces remain as supporting capabilities.
+
+| Route | Purpose |
+|---|---|
+| `/behavior` | Behavioral overview — fleet posture, source behavior table, highest deviation, recently resolved |
+| `/behavior/sources/[id]` | One source's observed volume against its seasonal baseline, with anomaly overlay |
+| `/anomalies` | Filterable, server-paginated anomaly list |
+| `/anomalies/[id]` | **Anomaly investigation** — what changed during the anomalous interval |
+| `/` · `/log-sources` · `/log-sources/[id]` | SOC overview and log-source inventory (Phase 1) |
+| `/offenses` · `/rules` · `/coverage` | Offenses, rule health, detection coverage (Phase 3) |
+| `/searches` · `/searches/[id]` · `/alerts` · `/alerts/[id]` | Scheduled searches and alert lifecycle (Phase 2) |
+
+All of these require the `read:anomalies` permission (behavioral routes) or their Phase 2/3
+equivalents. The guard lives on the router, not on individual handlers, so adding an endpoint to a
+guarded module cannot ship it unauthenticated. The browser holds no QRadar credential and never
+contacts QRadar or the MCP service directly.
+
+### The investigation page
+
+`/anomalies/[id]` answers one question — *what changed during the anomalous interval* — in seven
+sections: detection summary, timeline, lifecycle history, evidence completeness, contributor
+dimensions, dimension summary, and query provenance.
+
+Two behaviors there are load-bearing and are covered by tests:
+
+**Unavailable dimensions are rendered, never hidden.** When the QRadar event schema or DSM does not
+expose a field for the selected interval, that dimension still gets its section, marked
+`UNAVAILABLE` with the reason and an explicit statement that it has not been checked. A hidden
+dimension reads to an analyst as one that *was* examined and found clean, which inverts the truth.
+Its new/disappeared counts render as em dashes rather than the backend's default zeroes.
+
+**Evidence completeness is stated, not implied.** All six states (`NOT_REQUESTED`, `PENDING`,
+`COMPLETE`, `PARTIAL`, `UNAVAILABLE`, `FAILED`) render with their operational meaning, because four
+of them produce a page with no contributors — visually identical to "we looked and nothing stood
+out". Only the stated status distinguishes a queued job from a failed one from a source whose DSM
+emits nothing.
+
+The same rule governs every figure on every behavioral page: a value that was never measured renders
+as an em dash, and a value measured as zero renders as `0`. A `NO_EVENTS` anomaly's observed zero is
+a real finding; a null is the absence of one. In the charts, a `PARTIAL` or `MISSING` bucket is
+plotted as a null with `connectNulls: false` rather than as its reported value — drawing a line
+across an uncollected interval would turn a collector outage into an apparent source outage.
+
+## Compose stack
+
+```bash
+# One-time, if QRadar runs as a libvirt VM (see deploy/create-vmnet.sh):
+bash deploy/create-vmnet.sh
+
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=300
+```
+
+Expected: `postgres`, `redis`, `backend`, `celery-worker`, `celery-beat` and `frontend` healthy,
+with `migrate` exited 0 at revision `0004`. The frontend is on `:3000`, the backend on `:8000`
+(`/api/v1/health/live`, `/api/v1/health/ready`).
+
+If `docker compose up` fails with `network id ... not found` for `qradar-vmnet`, the external
+macvlan is stale — typically after a Docker daemon restart. Remove and recreate it:
+`docker network rm qradar-vmnet && bash deploy/create-vmnet.sh`.
+
 ## Development
 
 Backend, without Docker:
@@ -465,27 +536,48 @@ search executor and scheduler, search alerting, notification dispatch, the resul
 the API against a real database. All QRadar
 responses in tests are mocked and no notification is ever really sent (`MockNotifier`).
 
-Current suite: **881 tests — 634 unit + 247 integration, all passing with 0 skipped** against a real
-`timescale/timescaledb:2.17.2-pg16` instance. `ruff check` is clean; `mypy app` reports **28 existing
-errors in 16 files**, improved from the Phase 3 baseline of 29 in 17, with no new errors. Alembic
-upgrades a fresh database through `0003` and reports no drift.
+Current suite: **1078 tests, all passing with 0 skipped and 0 failed** against a real
+`timescale/timescaledb:2.17.2-pg16` instance. `ruff check` is clean; `mypy app` reports **31
+existing errors in 18 files**, unchanged from the Phase A backend baseline, with no new errors.
+Alembic upgrades a fresh database through `0004` and reports no drift.
+
+> Never run two `pytest` processes against the same test database concurrently. The schema fixture
+> drops and recreates tables, so a second run fails with unrelated collection errors, and a
+> subsequent `alembic check` against that database reports spurious drift.
 
 Frontend tests run under Vitest + Testing Library:
 
 ```bash
 cd frontend
+export PATH="$HOME/.local/node/bin:$PATH"
 npm ci
 npm audit --omit=dev
 npm run lint
 npm run typecheck
-npm test             # 64 tests
+npm test             # 275 tests
 npm run build
 ```
 
-The production build succeeds on Next.js **15.5.22**. The production-only audit currently reports
-5 transitive findings (2 moderate, 3 high): ECharts, PostCSS, and sharp. npm offers only breaking or
-incorrect forced resolutions for this pinned Next.js line, so no `--force` override is applied; see
-the Phase 3 handoff for the exact advisories and mitigations.
+Server components are tested by awaiting the page function and rendering its result with the API
+client stubbed, which is how the empty, error and authorization states are covered. ECharts is
+stubbed in chart tests — jsdom has no canvas — so what is asserted is the contract: modular
+registration, one `init`, resize observation, `dispose` on unmount, and the series data itself,
+which is where an unobserved interval would otherwise become a false zero.
+
+The production build succeeds on Next.js **15.5.22**. The production-only audit reports 5 transitive
+findings (2 moderate, 3 high), all pre-existing and none introduced by this workstream:
+
+| Package | Severity | Advisory | Assessment |
+|---|---|---|---|
+| `echarts` 5.5.1 | moderate | XSS in ECharts | Reachable only through a `formatter` that interpolates untrusted text into HTML. Ours interpolate timestamps, numbers and backend enum values only. |
+| `echarts-for-react` | moderate | transitively via `echarts` | Not used by the Phase A charts, which call `echarts/core` directly. |
+| `postcss` | high | XSS via unescaped `</style>`; source-map path traversal | Build-time only; no attacker-controlled CSS enters the build. |
+| `sharp` <0.35 | high | inherited libvips CVEs | Pulled in by Next.js image optimization, which this application does not use. |
+| `next` | high | depends on the two above | — |
+
+`npm audit fix --force` would install `next@9.3.3`, a six-major-version downgrade that does not
+support the App Router this application is built on. No forced resolution is applied; the fix is an
+upstream Next.js release on the 15.x line.
 
 Note on tooling: the enforced gates are `ruff check` and `pytest` (see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). `mypy` runs advisory-only until the Phase 1
@@ -593,7 +685,13 @@ lints and updates this README.
 - **Phase 3 ✅** — live read-only QRadar REST/Ariel collection, offenses, analytics rules,
   provenance-aware rule metrics and health, detection coverage, guarded APIs, Celery scheduling,
   MCP audit persistence, and operator dashboards.
+- **Phase A (backend ✅, frontend ✅, live validation pending)** — seasonal weekday×hour volume
+  baselines, `VOLUME_SPIKE` / `VOLUME_DROP` / `NO_EVENTS` detectors with an explicit anomaly
+  lifecycle, bounded Ariel contributor evidence, and the behavioral overview, source-behavior,
+  anomaly-list and investigation views. **Not yet validated against live QRadar telemetry.**
 - **Phase 4** — security hardening, expanded tests, documentation, observability.
+
+Next: Phase A synthetic telemetry generator expansion and live QRadar validation.
 
 ## License
 
