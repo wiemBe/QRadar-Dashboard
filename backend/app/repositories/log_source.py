@@ -7,7 +7,14 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import ACTIVE_ANOMALY_STATES
 from app.models.log_source import LogSource, LogSourceAnomaly
+
+# An incident is active while it is in a live lifecycle state, not while
+# resolved_at is NULL. A CANDIDATE that returns to normal before opening never
+# opened, so it is never resolved and keeps resolved_at NULL forever -- counting
+# that as active would report a live incident that no longer exists.
+_ACTIVE_STATES = [s.value for s in ACTIVE_ANOMALY_STATES]
 
 
 class LogSourceRepository:
@@ -39,11 +46,11 @@ class LogSourceRepository:
         return await self.session.scalar(stmt)
 
     async def open_anomaly_counts(self) -> dict[uuid.UUID, int]:
-        """Map of log_source_id -> count of unresolved, unsuppressed anomalies."""
+        """Map of log_source_id -> count of active, unsuppressed anomalies."""
         stmt = (
             select(LogSourceAnomaly.log_source_id, func.count())
             .where(
-                LogSourceAnomaly.resolved_at.is_(None),
+                LogSourceAnomaly.state.in_(_ACTIVE_STATES),
                 LogSourceAnomaly.suppressed.is_(False),
             )
             .group_by(LogSourceAnomaly.log_source_id)
@@ -58,7 +65,7 @@ class LogSourceRepository:
             select(LogSourceAnomaly)
             .where(
                 LogSourceAnomaly.log_source_id == log_source_id,
-                LogSourceAnomaly.resolved_at.is_(None),
+                LogSourceAnomaly.state.in_(_ACTIVE_STATES),
             )
             .order_by(LogSourceAnomaly.detected_at.desc())
         )
@@ -106,7 +113,7 @@ class LogSourceRepository:
 
     async def anomalous_source_count(self) -> int:
         stmt = select(func.count(func.distinct(LogSourceAnomaly.log_source_id))).where(
-            LogSourceAnomaly.resolved_at.is_(None),
+            LogSourceAnomaly.state.in_(_ACTIVE_STATES),
             LogSourceAnomaly.suppressed.is_(False),
         )
         return await self.session.scalar(stmt) or 0
