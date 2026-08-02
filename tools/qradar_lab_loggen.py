@@ -952,6 +952,9 @@ class LabEvent:
     run_id: str
     scenario: str
     phase: str
+    #: Device-shaped detail fields for the source kind. Ordered so a seeded run
+    #: renders byte-for-byte identically.
+    extras: tuple[tuple[str, str], ...] = ()
 
 
 def is_phase_a(scenario: str) -> bool:
@@ -1147,7 +1150,9 @@ class PhaseAGenerator:
         now = self.clock()
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
+        extras = self._extras(source.kind, action)
         return LabEvent(
+            extras=extras,
             timestamp=now,
             source=source,
             event_id=template.event_id,
@@ -1165,6 +1170,64 @@ class PhaseAGenerator:
             phase=phase,
         )
 
+    def _extras(self, kind: str, action: str) -> tuple[tuple[str, str], ...]:
+        """Device-shaped detail fields.
+
+        Volume detection never reads these, but an analyst looking at a raw
+        event does, and a DSM mapped against a payload with three fields is not
+        a DSM that will survive contact with a real appliance.
+        """
+        rng = self.rng
+        if kind == "firewall":
+            flags = "SYN" if action == "DENY" else rng.choice(("SYN ACK", "ACK", "PSH ACK"))
+            allowed = action == "ALLOW"
+            return (
+                ("direction", "inbound"),
+                ("ifName", "ens160"),
+                ("policyId", f"FW-{rng.randint(100, 199)}"),
+                ("ruleName", "lab-perimeter-in" if allowed else "lab-perimeter-drop"),
+                ("tcpFlags", flags),
+                ("ttl", str(rng.randint(48, 128))),
+                ("pktLen", str(rng.choice((40, 52, 60, 72, 84, 128)))),
+                ("bytesIn", str(rng.randint(64, 4096) if allowed else 0)),
+                ("bytesOut", str(rng.randint(64, 16384) if allowed else 0)),
+                ("sessionId", str(rng.randint(1_000_000, 9_999_999))),
+            )
+        if kind == "waf":
+            blocked = action == "DENY"
+            url, rule_id = (
+                ("/api/v1/report?id=1%27+OR+%271%27%3D%271", "942100")
+                if blocked
+                else (rng.choice(("/", "/portal/login", "/api/v1/status", "/static/app.css")),
+                      "-")
+            )
+            return (
+                ("httpMethod", rng.choice(("GET", "GET", "POST"))),
+                ("url", url),
+                ("virtualHost", "portal.lab.test"),
+                ("userAgent", rng.choice(
+                    (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "curl/8.7.1",
+                        "python-requests/2.32",
+                    )
+                ) if not blocked else "sqlmap/1.8"),
+                ("responseCode", "403" if blocked else rng.choice(("200", "200", "304", "404"))),
+                ("bytesIn", str(rng.randint(120, 2048))),
+                ("bytesOut", str(0 if blocked else rng.randint(200, 48000))),
+                ("ruleId", rule_id),
+            )
+        dropped = action == "DENY"
+        return (
+            ("sigId", "2010935" if dropped else str(rng.choice((2100365, 2034647, 2013504)))),
+            ("classification", "attempted-admin" if dropped else "policy-violation"),
+            ("priority", str(1 if dropped else rng.choice((2, 3)))),
+            ("flowId", str(rng.randint(1_000_000_000, 9_999_999_999))),
+            ("pktCount", str(rng.randint(1, 250))),
+            ("direction", "inbound"),
+            ("ifName", "ens160"),
+        )
+
     def render(self, event: LabEvent) -> str:
         body = (
             render_phase_a_leef(event)
@@ -1176,7 +1239,10 @@ class PhaseAGenerator:
 
 def render_phase_a_leef(event: LabEvent) -> str:
     fields = {
-        "devTime": _iso(event.timestamp),
+        # Epoch milliseconds, not ISO text: QRadar reads it without a
+        # devTimeFormat and without assuming a log-source timezone, so a
+        # generated event can never land in the wrong metric bucket.
+        "devTime": int(event.timestamp.timestamp() * 1000),
         "eventId": event.event_id,
         "eventName": event.event_name,
         "deviceHostName": event.source.host,
@@ -1192,7 +1258,13 @@ def render_phase_a_leef(event: LabEvent) -> str:
         "runId": event.run_id,
         "scenario": event.scenario,
         "phase": event.phase,
+        # `sev` and `cat` are the keys the Universal LEEF DSM maps without a
+        # custom property; the spelled-out names above stay for the operator
+        # reading a raw payload.
+        "sev": event.severity,
+        "cat": event.category,
     }
+    fields.update(dict(event.extras))
     extension = "\t".join(f"{key}={_leef_escape(value)}" for key, value in fields.items())
     header = f"LEEF:2.0|QRadarLab|{_leef_header(event.source.product)}|1.0"
     return f"{header}|{_leef_header(event.event_id)}|0x09|{extension}"
@@ -1205,25 +1277,33 @@ def _leef_header(value: str) -> str:
 
 def render_phase_a_vendor(event: LabEvent) -> str:
     """Vendor-shaped text for parser testing. One syslog tag, never two."""
+    extra = dict(event.extras)
+    trailer = f"runId={event.run_id} scenario={event.scenario} phase={event.phase}"
     if event.source.kind == "firewall":
         decision = "UFW BLOCK" if event.action == "DENY" else "UFW ALLOW"
         return (
-            f"kernel: [{decision}] IN=ens160 OUT= SRC={event.src} DST={event.dst} "
+            f"kernel: [{decision}] IN={extra.get('ifName', 'ens160')} OUT= "
+            f"SRC={event.src} DST={event.dst} LEN={extra.get('pktLen', '60')} "
+            f"TOS=0x00 PREC=0x00 TTL={extra.get('ttl', '64')} DF "
             f"PROTO={event.proto} SPT={event.src_port} DPT={event.dst_port} "
-            f"runId={event.run_id} scenario={event.scenario} phase={event.phase}"
+            f"WINDOW=64240 RES=0x00 {extra.get('tcpFlags', 'SYN')} URGP=0 {trailer}"
         )
     if event.source.kind == "waf":
         return (
-            f"ModSecurity: [action \"{event.action.lower()}\"] [id \"{event.event_id}\"] "
-            f"[msg \"{event.event_name}\"] [client {event.src}] [hostname {event.dst}] "
-            f"[uri \"/lab/phase-a\"] runId={event.run_id} scenario={event.scenario} "
-            f"phase={event.phase}"
+            f"ModSecurity: [client {event.src}] ModSecurity: "
+            f"{'Access denied with code 403' if event.action == 'DENY' else 'Warning'}. "
+            f"[file \"/etc/modsecurity/crs.conf\"] [id \"{extra.get('ruleId', '-')}\"] "
+            f"[msg \"{event.event_name}\"] [severity \"{event.severity}\"] "
+            f"[hostname \"{extra.get('virtualHost', event.dst)}\"] "
+            f"[uri \"{extra.get('url', '/')}\"] [unique_id \"{extra.get('bytesIn', '0')}\"] "
+            f"{trailer}"
         )
     return (
-        f"suricata: [{event.action}] [**] [1:{event.event_id}:1] {event.event_name} [**] "
-        f"[Priority: {event.severity}] {{{event.proto}}} "
-        f"{event.src}:{event.src_port} -> {event.dst}:{event.dst_port} "
-        f"runId={event.run_id} scenario={event.scenario} phase={event.phase}"
+        f"suricata: [{'Drop' if event.action == 'DENY' else 'Alert'}] [**] "
+        f"[1:{extra.get('sigId', '0')}:1] {event.event_name} [**] "
+        f"[Classification: {extra.get('classification', '-')}] "
+        f"[Priority: {extra.get('priority', '3')}] {{{event.proto}}} "
+        f"{event.src}:{event.src_port} -> {event.dst}:{event.dst_port} {trailer}"
     )
 
 

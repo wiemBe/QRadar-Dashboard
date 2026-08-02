@@ -173,6 +173,50 @@ def test_leef_carries_every_required_phase_a_field() -> None:
         assert required <= set(leef_fields(message))
 
 
+def test_devtime_is_epoch_milliseconds_so_qradar_needs_no_devtimeformat() -> None:
+    # ISO text would be read against the log source's timezone; an event that
+    # parses three hours late lands in the wrong metric bucket.
+    parsed = leef_fields(emit(options(baseline_duration=2.0))[0])
+    assert parsed["devTime"] == str(int(NOW.timestamp() * 1000))
+
+
+def test_leef_carries_the_dsm_mapped_short_keys_alongside_the_readable_ones() -> None:
+    parsed = leef_fields(emit(options(baseline_duration=2.0))[0])
+    assert parsed["sev"] == parsed["severity"]
+    assert parsed["cat"] == parsed["category"]
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    (
+        ("lab-fw-volume-01", {"direction", "ifName", "policyId", "ruleName", "tcpFlags",
+                              "ttl", "pktLen", "bytesIn", "bytesOut", "sessionId"}),
+        ("lab-waf-volume-01", {"httpMethod", "url", "virtualHost", "userAgent",
+                               "responseCode", "bytesIn", "bytesOut", "ruleId"}),
+        ("lab-ips-volume-01", {"sigId", "classification", "priority", "flowId",
+                               "pktCount", "direction", "ifName"}),
+    ),
+)
+def test_each_source_kind_carries_device_shaped_detail_fields(host: str, expected: set) -> None:
+    for message in emit(options(scenario="source-volume-baseline", fixed_host=host,
+                                baseline_duration=10.0)):
+        assert expected <= set(leef_fields(message))
+
+
+def test_denied_firewall_events_move_no_bytes_and_carry_a_syn_only_flag() -> None:
+    denied = [
+        parsed
+        for parsed in (leef_fields(m) for m in emit(options(baseline_duration=60.0)))
+        if parsed["action"] == "DENY" and parsed["deviceHostName"].startswith("lab-fw")
+    ]
+    assert denied
+    for parsed in denied:
+        assert parsed["bytesIn"] == "0"
+        assert parsed["bytesOut"] == "0"
+        assert parsed["tcpFlags"] == "SYN"
+        assert parsed["ruleName"] == "lab-perimeter-drop"
+
+
 def test_leef_values_escape_delimiters_and_headers_escape_pipes() -> None:
     assert loggen._leef_escape("a\tb") == "a\\tb"
     assert loggen._leef_escape("a\nb") == "a\\nb"
@@ -279,8 +323,17 @@ def test_silence_scenario_stops_after_baseline_without_heartbeats() -> None:
     messages = emit(opts)
     assert {leef_fields(message)["phase"] for message in messages} == {"baseline"}
     assert len(messages) == 40
-    # Silence is the absence of events, never a synthetic zero-count heartbeat.
-    assert not any("=0\t" in message or "heartbeat" in message.lower() for message in messages)
+    # Silence is the absence of events, never a synthetic zero-count heartbeat:
+    # every message is a real device event, and none announces its own absence.
+    for message in messages:
+        parsed = leef_fields(message)
+        assert parsed["eventId"] in {
+            template.event_id
+            for mixture in loggen.BASELINE_MIXTURES.values()
+            for template in mixture.templates
+        }
+        assert "heartbeat" not in parsed["eventName"].lower()
+        assert "zero" not in parsed["eventName"].lower()
     # A silence run must not disturb the spike/drop source's own history.
     assert plan.hosts == (loggen.DEFAULT_SILENCE_HOST,)
     assert loggen.DEFAULT_SILENCE_HOST != loggen.DEFAULT_PHASE_A_HOST
