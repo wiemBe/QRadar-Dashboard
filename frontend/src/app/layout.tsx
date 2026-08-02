@@ -3,8 +3,14 @@ import type { Metadata } from "next";
 import { SECTIONS } from "@/lib/sections";
 
 export const metadata: Metadata = {
-  title: "QRadar Observability",
-  description: "On-premises QRadar SOC analytics and health monitoring",
+  title: {
+    default: "QRadar Behavioral Anomaly and Investigation Platform",
+    template: "%s · QRadar Behavioral Analytics",
+  },
+  description:
+    "Behavioral anomaly detection and investigation for on-premises QRadar: " +
+    "seasonal volume baselines, an explicit anomaly lifecycle, and bounded " +
+    "evidence answering what changed during an anomalous interval.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -15,7 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <div className="layout">
           <aside className="sidebar">
-            <h1>QRadar Observability</h1>
+            <h1>QRadar Behavioral Analytics</h1>
             <nav>
               {nav.map((s) => (
                 <a key={s.slug} href={`/${s.slug}`}>
