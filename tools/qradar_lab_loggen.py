@@ -1007,6 +1007,10 @@ def build_plan(options: PhaseAOptions, *, now: datetime | None = None) -> Scenar
     for host in hosts:
         if host not in PHASE_A_SOURCES:
             raise ValueError(f"unknown Phase A source: {host}")
+        # filterlog is a firewall log format; a WAF or IPS source rendered as
+        # pfSense would be a lie the DSM would happily parse.
+        if options.output_format == "pfsense" and PHASE_A_SOURCES[host].kind != "firewall":
+            raise ValueError("--format pfsense is only valid for a firewall source")
     baseline_eps, anomaly_eps = resolve_rates(options)
     anomaly_mode = "reduced" if _is_drop_scenario(options.scenario) else "concentrated"
     run_id = options.run_id or default_run_id(now or datetime.now(UTC))
@@ -1086,6 +1090,8 @@ def validate_phase_a_options(options: PhaseAOptions) -> None:
         raise ValueError(
             "--fixed-host must be one of: " + ", ".join(sorted(PHASE_A_SOURCES))
         )
+    if options.output_format not in PHASE_A_RENDERERS:
+        raise ValueError(f"--format must be one of: {', '.join(PHASE_A_FORMATS)}")
     for flag, address in (
         ("--fixed-source-ip", options.fixed_source_ip),
         ("--fixed-destination-ip", options.fixed_destination_ip),
@@ -1229,12 +1235,8 @@ class PhaseAGenerator:
         )
 
     def render(self, event: LabEvent) -> str:
-        body = (
-            render_phase_a_leef(event)
-            if self.options.output_format == "leef"
-            else render_phase_a_vendor(event)
-        )
-        return f"<134>{_rfc3164(event.timestamp)} {event.source.host} {body}"
+        renderer = PHASE_A_RENDERERS[self.options.output_format]
+        return f"<134>{_rfc3164(event.timestamp)} {event.source.host} {renderer(event)}"
 
 
 def render_phase_a_leef(event: LabEvent) -> str:
@@ -1268,6 +1270,75 @@ def render_phase_a_leef(event: LabEvent) -> str:
     extension = "\t".join(f"{key}={_leef_escape(value)}" for key, value in fields.items())
     header = f"LEEF:2.0|QRadarLab|{_leef_header(event.source.product)}|1.0"
     return f"{header}|{_leef_header(event.event_id)}|0x09|{extension}"
+
+
+#: pfSense writes the matched rule number and its tracker UID on every line.
+#: Phase A uses one rule per phase, so the generator phase survives into QRadar
+#: even though filterlog has no field for a run identifier.
+PHASE_RULE_NUMBERS = {PHASE_BASELINE: 5, PHASE_ANOMALY: 6, PHASE_RECOVERY: 7}
+
+#: pfSense names interfaces the FreeBSD way; the Linux `ifName` carried for the
+#: UFW renderer would be wrong on a filterlog line.
+PFSENSE_WAN_INTERFACE = "em0"
+PFSENSE_FILTERLOG_PID = 41231
+
+#: filterlog reports TCP flags as concatenated single letters.
+_TCP_FLAG_LETTERS = {"SYN": "S", "ACK": "A", "PSH": "P", "FIN": "F", "RST": "R", "URG": "U"}
+
+
+def _pf_flags(flags: str) -> str:
+    return "".join(_TCP_FLAG_LETTERS.get(part, "") for part in flags.split())
+
+
+def render_phase_a_pfsense(event: LabEvent) -> str:
+    """A pfSense ``filterlog`` line, which the Netgate pfSense DSM parses.
+
+    Field order is the documented IPv4/TCP layout: rule, sub-rule, anchor,
+    tracker, interface, reason, action, direction, IP version, then the IPv4
+    header block, then the TCP block. QRadar extracts source and destination
+    address, ports, protocol and the pass/block action from this natively, so
+    Phase A evidence needs no custom property.
+    """
+    extra = dict(event.extras)
+    rule = PHASE_RULE_NUMBERS.get(event.phase, 5)
+    session = int(extra.get("sessionId", "0"))
+    blocked = event.action == "DENY"
+    flags = _pf_flags(extra.get("tcpFlags", "SYN"))
+    data_len = 0 if blocked else int(extra.get("bytesIn", "0"))
+    fields = [
+        str(rule),                                   # rule number
+        "",                                          # sub rule number
+        "",                                          # anchor
+        str(1_000_000_000 + rule),                   # tracker
+        PFSENSE_WAN_INTERFACE,                       # real interface
+        "match",                                     # reason
+        "block" if blocked else "pass",              # action
+        "in" if extra.get("direction") == "inbound" else "out",
+        "4",                                         # IP version
+        "0x0",                                       # TOS
+        "",                                          # ECN
+        extra.get("ttl", "64"),                      # TTL
+        str(session % 65535),                        # IP id
+        "0",                                         # fragment offset
+        "DF",                                        # IP flags
+        "6" if event.proto == "TCP" else "17",       # protocol id
+        event.proto.lower(),                         # protocol text
+        extra.get("pktLen", "60"),                   # length
+        event.src,
+        event.dst,
+        str(event.src_port),
+        str(event.dst_port),
+        str(data_len),
+        flags,
+        str(session),                                # sequence number
+        "" if blocked else str(session + 1),         # ack number
+        "0" if blocked else "64240",                 # window
+        "",                                          # urg
+        "mss;nop;wscale;sackOK;TS" if flags.startswith("S") else "",
+    ]
+    # One filterlog process per appliance, so the PID is constant across a run
+    # exactly as it is on a real pfSense between reboots.
+    return f"filterlog[{PFSENSE_FILTERLOG_PID}]: " + ",".join(fields)
 
 
 def _leef_header(value: str) -> str:
@@ -1305,6 +1376,15 @@ def render_phase_a_vendor(event: LabEvent) -> str:
         f"[Priority: {extra.get('priority', '3')}] {{{event.proto}}} "
         f"{event.src}:{event.src_port} -> {event.dst}:{event.dst_port} {trailer}"
     )
+
+
+PHASE_A_RENDERERS: dict[str, Callable[[LabEvent], str]] = {
+    "leef": render_phase_a_leef,
+    "vendor": render_phase_a_vendor,
+    "pfsense": render_phase_a_pfsense,
+}
+
+PHASE_A_FORMATS = tuple(PHASE_A_RENDERERS)
 
 
 def build_schedule(plan: ScenarioPlan) -> list[tuple[float, str, SourceRate]]:
@@ -1559,6 +1639,10 @@ class SyslogSender:
 
 
 def validate_options(options: Options) -> None:
+    if options.output_format not in {"leef", "vendor"}:
+        # pfsense belongs to the Phase A firewall sources; the recipe scenarios
+        # would otherwise silently fall through to the vendor renderer.
+        raise ValueError("--format pfsense is only valid for a Phase A scenario")
     if options.eps <= 0:
         raise ValueError("--eps must be greater than 0")
     if options.eps > MAX_SAFE_EPS and not options.allow_high_rate:
@@ -1679,7 +1763,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=list(PROFILES),
     )
     parser.add_argument(
-        "--format", dest="output_format", choices=("leef", "vendor"), default="leef"
+        "--format",
+        dest="output_format",
+        # pfsense is a Phase A firewall format only; the recipe scenarios above
+        # reject it in validate_options.
+        choices=("leef", "vendor", "pfsense"),
+        default="leef",
     )
     parser.add_argument("--scenario", choices=(*SCENARIOS, *PHASE_A_SCENARIOS), default="normal")
     parser.add_argument("--seed", type=int)

@@ -246,6 +246,100 @@ def test_vendor_output_covers_waf_and_ips_sources() -> None:
     assert all(" suricata: " in message for message in ips)
 
 
+# ------------------------------------------------------------------ pfSense
+
+
+def pf_fields(message: str) -> list[str]:
+    body = loggen.syslog_body(message)
+    tag, _, csv = body.partition(": ")
+    assert tag == f"filterlog[{loggen.PFSENSE_FILTERLOG_PID}]"
+    return csv.split(",")
+
+
+def test_pfsense_lines_use_the_documented_filterlog_ipv4_tcp_layout() -> None:
+    for message in emit(options(output_format="pfsense", baseline_duration=30.0)):
+        fields = pf_fields(message)
+        # 9 common fields + 11 IPv4 fields + 9 TCP fields
+        assert len(fields) == 29
+        assert fields[1] == "" and fields[2] == ""          # sub rule, anchor
+        assert fields[4] == loggen.PFSENSE_WAN_INTERFACE     # FreeBSD name, not ens160
+        assert fields[5] == "match"
+        assert fields[6] in {"pass", "block"}
+        assert fields[7] == "in"
+        assert fields[8] == "4"
+        assert fields[15] == "6" and fields[16] == "tcp"
+        assert fields[18].count(".") == 3 and fields[19].count(".") == 3
+        assert fields[20].isdigit() and fields[21].isdigit()
+
+
+def test_pfsense_action_and_flags_agree_with_the_event() -> None:
+    for message in emit(options(output_format="pfsense", baseline_duration=60.0)):
+        fields = pf_fields(message)
+        blocked = fields[6] == "block"
+        assert fields[23].startswith("S") if blocked else True
+        # A blocked packet is never acknowledged and carries no payload.
+        assert (fields[22], fields[25], fields[26]) == ("0", "", "0") if blocked else True
+
+
+def test_pfsense_rule_and_tracker_carry_the_generator_phase() -> None:
+    # filterlog has no field for a run id, so the phase rides on the matched
+    # rule number -- which is how a real appliance distinguishes rules anyway.
+    fake = FakeTime()
+    RecordingSender.instances.clear()
+    loggen.run_phase_a(
+        options(output_format="pfsense", baseline_eps=2.0, baseline_duration=10.0,
+                anomaly_duration=5.0, recovery_duration=5.0),
+        sender_factory=RecordingSender,
+        monotonic=fake.monotonic,
+        sleeper=fake.sleep,
+        clock=lambda: NOW,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    rules = Counter(pf_fields(m)[0] for m in RecordingSender.instances[-1].messages)
+    assert set(rules) == {"5", "6", "7"}
+    for message in RecordingSender.instances[-1].messages:
+        fields = pf_fields(message)
+        assert fields[3] == str(1_000_000_000 + int(fields[0]))
+    assert loggen.PHASE_RULE_NUMBERS == {"baseline": 5, "anomaly": 6, "recovery": 7}
+
+
+def test_pfsense_still_concentrates_the_spike_on_the_contributors() -> None:
+    fake = FakeTime()
+    RecordingSender.instances.clear()
+    loggen.run_phase_a(
+        options(output_format="pfsense", baseline_eps=2.0, baseline_duration=60.0,
+                anomaly_duration=60.0, recovery_duration=10.0),
+        sender_factory=RecordingSender,
+        monotonic=fake.monotonic,
+        sleeper=fake.sleep,
+        clock=lambda: NOW,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    anomaly = [pf_fields(m) for m in RecordingSender.instances[-1].messages
+               if pf_fields(m)[0] == "6"]
+    assert Counter(f[18] for f in anomaly).most_common(1)[0][0] == loggen.CONTRIBUTOR_SOURCE_IP
+    assert Counter(f[19] for f in anomaly).most_common(1)[0][0] == (
+        loggen.CONTRIBUTOR_DESTINATION_IP
+    )
+    assert Counter(f[21] for f in anomaly).most_common(1)[0][0] == str(
+        loggen.CONTRIBUTOR_DESTINATION_PORT
+    )
+    assert Counter(f[6] for f in anomaly).most_common(1)[0][0] == "block"
+
+
+def test_pfsense_is_rejected_for_non_firewall_sources_and_recipe_scenarios() -> None:
+    with pytest.raises(ValueError, match="firewall source"):
+        loggen.build_plan(
+            options(scenario="source-volume-baseline", fixed_host="lab-waf-volume-01",
+                    output_format="pfsense"),
+            now=NOW,
+        )
+    with pytest.raises(ValueError, match="Phase A scenario"):
+        loggen.validate_options(loggen.Options(output_format="pfsense"))
+
+
 # ------------------------------------------------------------ phase timing
 
 
