@@ -168,9 +168,31 @@ Background lab traffic resumed at roughly `17:33Z` and is flowing at about 8,300
 across other log sources. Source 227 remains at zero outside the smoke minute, so it is clean for
 scenario work.
 
+The `12:55Z–17:33Z` gap is a **real host-suspension interval**, not a collection failure and not a
+symptom of the query-builder defect. The two are independent and must not be conflated: the defect
+zeroed historical buckets that did contain events, whereas this window contained no events to
+collect. No event was fabricated and the gap was not reinterpreted.
+
 No metric, anomaly, or evidence row was deleted at any point. The `log_source_metric` watermark was
 reset backward to `12:54Z` to re-collect the window the defect had skipped; re-collection is an
-idempotent upsert on `(log_source_id, bucket_start)`.
+idempotent upsert on `(log_source_id, bucket_start)`. Letting that re-collection run to completion
+validates `dc9aa34` across both historical empty and historical non-empty intervals.
+
+### Operational limitation: watermark advancement is last-write-wins
+
+The manual watermark reset was **overwritten twice** by in-flight `collect_metrics` runs before it
+took effect. The collector reads `watermark_at` into its session at the start of a run and writes it
+back at the end, so a concurrent external write is silently lost. The per-instance advisory lock
+stops two collectors from overlapping but does not protect the row from a writer that never takes
+the lock.
+
+Recorded as a follow-up in `docs/PHASE-A-SOURCE-VOLUME-ANOMALY.md` §11.1, with compare-and-set,
+row-level locking, a version column, a maintenance-mode pause, and a lock-acquiring administrative
+reset command as the candidate fixes. Deliberately not redesigned during live validation.
+
+Until that follow-up lands, a watermark must not be reset while collection tasks are active. Any
+future reset must pause Beat or worker consumption, wait for in-flight collection to drain, reset
+through a documented path, resume collection, and verify the next window.
 
 ## Live scenario results
 

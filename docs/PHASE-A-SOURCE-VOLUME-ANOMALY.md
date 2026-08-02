@@ -330,7 +330,33 @@ full Compose stack healthy.
 1. **Generator scenarios** — the eight Phase A scenarios and their flags in
    `tools/qradar_lab_loggen.py`.
 2. **Live QRadar validation** — baseline / spike / investigation / recovery /
-   drop / silence against the isolated lab. **Not yet performed.** Every result
-   reported so far comes from automated tests against the mock provider and a
-   real PostgreSQL/TimescaleDB, not from live QRadar telemetry. No synthetic
-   events have been transmitted to the appliance.
+   drop / silence against the isolated lab. In progress; see
+   `docs/LAB-DEMO-RESULTS.md` for verified live facts.
+3. **Watermark advancement is last-write-wins.** See below.
+
+### 11.1 Follow-up: contended watermark advancement
+
+`CollectionWatermark.watermark_at` is read into the collector's session at the
+start of a run and written back at the end. Any concurrent write to that row —
+including an operator correcting a watermark — is silently overwritten when the
+in-flight run flushes. Observed live on 2026-08-02: a manual reset was clobbered
+twice by in-flight `collect_metrics` runs before it took effect.
+
+The per-instance advisory lock prevents two collectors from overlapping, but it
+does not protect the row against a writer that never takes the lock, so this is
+a real operational limitation rather than a theoretical race.
+
+Not fixed here: correcting it is a change to the collection contract and does
+not belong inside live Phase A validation. One of the following should be
+chosen as a scoped follow-up:
+
+- compare-and-set advancement (`UPDATE … WHERE watermark_at = <observed>`);
+- `SELECT … FOR UPDATE` row-level locking around read-modify-write;
+- a generation/version column with an optimistic-concurrency check;
+- a maintenance mode that pauses collectors before administrative edits;
+- an administrative reset command that acquires the same collection lock.
+
+Until one exists, a watermark must never be reset while collection tasks are
+active. The required manual procedure is: pause the Beat schedule or worker
+consumption, wait for in-flight collection to drain, perform the reset, resume
+collection, then verify the next window starts where expected.
