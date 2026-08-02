@@ -152,8 +152,6 @@ class MetricCollector:
         samples = await self.provider.get_log_source_metrics(start, end)
         collected_at = self._clock()
         duration_ms = int((collected_at - started).total_seconds() * 1000)
-        if not samples:
-            return 0
 
         # Map qradar_id -> internal LogSource id for this instance.
         id_map = await self._log_source_id_map(instance.id)
@@ -200,6 +198,20 @@ class MetricCollector:
                     "payload_signature": s.payload_signature,
                 }
             )
+
+        rows.extend(
+            await self._zero_filled_rows(
+                instance,
+                start,
+                end,
+                reported={s.qradar_id for s in samples},
+                id_map=id_map,
+                provenance=provenance,
+                duration_ms=duration_ms,
+                collected_at=collected_at,
+                watermark_at=watermark_at,
+            )
+        )
         if not rows:
             return 0
 
@@ -212,6 +224,93 @@ class MetricCollector:
         )
         await self.session.execute(stmt)
         return len(rows)
+
+    async def _zero_filled_rows(
+        self,
+        instance: QRadarInstance,
+        start: datetime,
+        end: datetime,
+        *,
+        reported: set[int],
+        id_map: dict[int, uuid.UUID],
+        provenance: dict,
+        duration_ms: int,
+        collected_at: datetime,
+        watermark_at: datetime | None,
+    ) -> list[dict]:
+        """Explicit zero buckets for monitored sources QRadar did not report.
+
+        A source that emits nothing is simply absent from the Ariel
+        `GROUP BY logsourceid` result, so without this the interval leaves no
+        row at all. Silence would then be indistinguishable from a collection
+        gap: the anomaly engine evaluates the newest row it can find, so it
+        would re-judge the last busy bucket forever and never observe the
+        silence. `detect_no_events` requires a COMPLETE bucket with a zero
+        count, and `_preceding_empty_buckets` counts consecutive complete zero
+        buckets — both were written expecting these rows to exist.
+
+        Only monitored sources are filled. An unmonitored source is never
+        evaluated, so a row for it would be storage without a reader.
+
+        The zero is an observation, not an assumption: the query for this
+        window succeeded and returned no events for this source. That is why
+        the row is COMPLETE. A failed or partial collection raises instead of
+        reaching this point, so no zero row is ever written for a window we did
+        not actually observe.
+        """
+        missing = [
+            (qradar_id, ls_id)
+            for qradar_id, ls_id in id_map.items()
+            if qradar_id not in reported
+        ]
+        if not missing:
+            return []
+
+        monitored = set(
+            (
+                await self.session.scalars(
+                    select(LogSource.id).where(
+                        LogSource.instance_id == instance.id,
+                        LogSource.monitoring_enabled.is_(True),
+                    )
+                )
+            ).all()
+        )
+
+        bucket_seconds = int((end - start).total_seconds())
+        # Marked so a zero that came from an empty result is never mistaken for
+        # a zero that a provider actively reported.
+        zero_provenance = {**provenance, "zero_filled": True}
+
+        return [
+            {
+                "log_source_id": ls_id,
+                "bucket_start": start,
+                "completeness": BucketCompleteness.COMPLETE,
+                "collection_source": self._collection_source,
+                "query_provenance": zero_provenance,
+                "collection_duration_ms": duration_ms,
+                "collected_at": collected_at,
+                "watermark_at": watermark_at,
+                "bucket_seconds": bucket_seconds,
+                "event_count": 0,
+                "average_eps": 0.0,
+                "peak_eps": 0.0,
+                "last_event_at": None,
+                "event_delay_seconds": None,
+                "unknown_event_count": 0,
+                "stored_event_count": 0,
+                "parsed_username_ratio": None,
+                "parsed_source_ip_ratio": None,
+                "distinct_qid_count": 0,
+                "distinct_username_count": 0,
+                "distinct_source_ip_count": 0,
+                "collection_error_count": 0,
+                "payload_signature": None,
+            }
+            for _, ls_id in missing
+            if ls_id in monitored
+        ]
 
     async def _log_source_id_map(self, instance_id: uuid.UUID) -> dict[int, uuid.UUID]:
         rows = await self.session.execute(

@@ -116,3 +116,77 @@ async def test_advisory_lock_prevents_overlap(db_session) -> None:
         )
         conn.close()
         holder.dispose()
+
+
+class TestZeroFill:
+    """A silent source must leave an explicit zero bucket, not nothing at all.
+
+    QRadar omits a source with no events from the `GROUP BY logsourceid`
+    aggregate. Without an explicit zero row the interval leaves no trace, and
+    the anomaly engine -- which evaluates the newest row it can find -- would
+    re-judge the last busy bucket forever and never observe the silence. That
+    made live NO_EVENTS unreachable: `detect_no_events` requires a COMPLETE
+    bucket whose count is zero.
+    """
+
+    @staticmethod
+    async def _collect_with(session, instance, samples, now):
+        provider = MockQRadarProvider(seed=1337)
+
+        async def _metrics(window_start, window_end):
+            return samples
+
+        provider.get_log_source_metrics = _metrics  # type: ignore[method-assign]
+        collector = MetricCollector(
+            session, provider, settings=_settings(), clock=lambda: now
+        )
+        return await collector.collect(instance)
+
+    async def test_monitored_source_absent_from_ariel_gets_a_zero_bucket(
+        self, db_session
+    ) -> None:
+        instance = await _seed_inventory(db_session)
+        now = datetime(2026, 7, 15, 10, 3, tzinfo=UTC)
+
+        # QRadar reports nothing at all for this window: every monitored source
+        # was silent.
+        await self._collect_with(db_session, instance, [], now)
+
+        rows = list(
+            (await db_session.scalars(select(LogSourceMetric))).all()
+        )
+        assert rows, "a silent interval must still leave evidence it was observed"
+        for row in rows:
+            assert row.event_count == 0
+            assert row.average_eps == 0.0
+            # COMPLETE because the query succeeded and returned no events -- an
+            # observation of silence, not an unobserved window.
+            assert row.is_complete
+            assert row.query_provenance.get("zero_filled") is True
+
+    async def test_zero_rows_are_upserted_not_duplicated(self, db_session) -> None:
+        instance = await _seed_inventory(db_session)
+        now = datetime(2026, 7, 15, 10, 3, tzinfo=UTC)
+
+        await self._collect_with(db_session, instance, [], now)
+        first = await db_session.scalar(select(func.count()).select_from(LogSourceMetric))
+        # Re-collecting the same interval overwrites rather than duplicating.
+        await self._collect_with(db_session, instance, [], now)
+        second = await db_session.scalar(select(func.count()).select_from(LogSourceMetric))
+        assert first == second
+
+    async def test_unmonitored_sources_are_not_zero_filled(self, db_session) -> None:
+        instance = await _seed_inventory(db_session)
+        now = datetime(2026, 7, 15, 10, 3, tzinfo=UTC)
+
+        from app.models.log_source import LogSource
+
+        sources = list((await db_session.scalars(select(LogSource))).all())
+        for src in sources:
+            src.monitoring_enabled = False
+        await db_session.flush()
+
+        await self._collect_with(db_session, instance, [], now)
+
+        count = await db_session.scalar(select(func.count()).select_from(LogSourceMetric))
+        assert count == 0, "an unmonitored source is never evaluated, so it needs no row"
