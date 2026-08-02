@@ -80,6 +80,14 @@ export interface LogSourceSummary {
 
 export interface LogSourceDetail {
   id: string;
+  // These five are non-nullable in the backend's LogSourceDetail schema and
+  // have always been in the response; the type simply did not declare them.
+  // Adding them is a frontend correction, not a contract change.
+  qradar_id: number;
+  enabled: boolean;
+  monitoring_enabled: boolean;
+  maintenance_mode: boolean;
+  timezone_name: string;
   name: string;
   type_name: string | null;
   description: string | null;

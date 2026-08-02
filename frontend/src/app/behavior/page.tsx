@@ -220,15 +220,19 @@ export default async function BehaviorPage() {
                         </span>
                       </td>
                       <td>
-                        {row.issue}
-                        {row.severity && (
-                          <>
-                            {" "}
+                        {/* Label and badge are separate elements: the label
+                            wraps, the badge does not, and neither squeezes
+                            the other. */}
+                        <span className="issue-with-severity">
+                          <span className="issue-with-severity__label">
+                            {row.issue}
+                          </span>
+                          {row.severity && (
                             <span className={`pill pill-quiet ${sevTone(row.severity)}`}>
                               {row.severity}
                             </span>
-                          </>
-                        )}
+                          )}
+                        </span>
                       </td>
                       <td className="num">
                         {formatMetric(row.observed)}

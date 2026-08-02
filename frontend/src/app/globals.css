@@ -18,13 +18,6 @@
   box-sizing: border-box;
 }
 
-html {
-  /* Nothing on these pages is wide enough to justify a horizontal page
-     scrollbar; where content genuinely exceeds the viewport it scrolls inside
-     its own container instead. */
-  overflow-x: hidden;
-}
-
 body {
   margin: 0;
   background: var(--canvas);
@@ -253,7 +246,22 @@ td.num {
 .cards {
   display: grid;
   gap: var(--sp-4);
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  /* `min(100%, 200px)` rather than a bare 200px: below 200px of available
+     width a bare minimum makes the track wider than the container and the
+     grid pushes the page out. The min() clamps the track to the container,
+     so the row wraps instead of overflowing. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  min-width: 0;
+}
+/* Grid and flex children default to `min-width: auto`, which refuses to
+   shrink below their content. One long unbroken label is then enough to widen
+   the whole row. */
+.grid > *,
+.cards > *,
+.grid-4 > *,
+.contributor-cards > *,
+.quality-grid > * {
+  min-width: 0;
 }
 /* A fixed four-up KPI row that folds to 2x2 rather than reflowing to an
    arbitrary count, so the primary metrics keep a stable reading order. */
@@ -261,6 +269,7 @@ td.num {
   display: grid;
   gap: var(--sp-4);
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-width: 0;
 }
 
 .card,
@@ -276,6 +285,7 @@ td.num {
 
 .card .k,
 .metric-label {
+  overflow-wrap: anywhere;
   color: var(--text-3);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
@@ -422,6 +432,7 @@ th[aria-sort="descending"] .sort-link {
 .badge {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: var(--sp-1);
   padding: 2px var(--sp-2);
   border-radius: var(--r-pill);
@@ -430,8 +441,14 @@ th[aria-sort="descending"] .sort-link {
   color: var(--neutral-text);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
-  line-height: 1.45;
+  line-height: 1;
+  min-height: 24px;
   white-space: nowrap;
+  /* A badge is sized by its own text. Inside a flex or grid parent the
+     default `min-width: auto` is not enough on its own — without an explicit
+     refusal to shrink, a long sibling label squeezes the badge narrower than
+     its content and the text clips. */
+  flex: 0 0 auto;
 }
 .pill.ok {
   color: var(--ok-text);
@@ -454,13 +471,36 @@ th[aria-sort="descending"] .sort-link {
   border-color: var(--info-border);
 }
 /* Secondary status: present and readable, but not competing with the primary
-   lifecycle badge on the same row. */
-.pill-quiet {
+   lifecycle badge on the same row.
+ *
+ * Written as `.pill.pill-quiet` deliberately. At `.pill-quiet` (specificity
+ * 0,1,0) the tone rules `.pill.crit` / `.pill.warn` / `.pill.ok` (0,2,0) won
+ * the border and background while this rule still won the padding — producing
+ * a coloured, bordered badge with zero horizontal padding whose text sat
+ * against its own border and flush against the label beside it. Matching the
+ * tone rules' specificity is the fix; the padding stays at the normal value so
+ * the badge is quiet in colour without being cramped in space. */
+.pill.pill-quiet {
   border-color: transparent;
   background: transparent;
-  padding-left: 0;
-  padding-right: 0;
   font-weight: var(--fw-normal);
+}
+
+/* A label paired with a status badge.
+ *
+ * The label may wrap; the badge may not. `min-width: 0` on the label lets it
+ * shrink and wrap instead of forcing the row wider, and the badge keeps its
+ * intrinsic width via `flex: 0 0 auto` above. */
+.issue-with-severity {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.issue-with-severity__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* --- tables ----------------------------------------------------------------
@@ -640,10 +680,21 @@ button.action.secondary:hover {
   gap: var(--sp-2);
   align-items: center;
   margin: 0 0 var(--sp-5);
+  min-width: 0;
 }
+/* The search field takes the remaining width and yields it back when the row
+   must wrap. `min-width: 0` is what allows it to shrink at all — a form
+   control's intrinsic minimum would otherwise hold the row open and push the
+   trailing button off the page. */
 .filters input[type="search"] {
-  min-width: 240px;
   flex: 1 1 240px;
+  min-width: 0;
+}
+.filters select,
+.filters button,
+.filters input[type="datetime-local"] {
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 .filters button {
   background: var(--info);
@@ -1069,6 +1120,64 @@ button.action.secondary:hover {
   max-width: 80ch;
 }
 
+/* --- source detail ------------------------------------------------------------ */
+
+.section-head {
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+.section-head .section-title {
+  margin-bottom: 0;
+}
+
+/* The range control: links, so it is keyboard-operable with no script. */
+.range-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+}
+.range-option {
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+}
+.main a.range-option {
+  color: var(--text-3);
+}
+.main a.range-option:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  text-decoration: none;
+}
+.main a.range-option-active {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+/* "Still learning" replaces a number, so it takes the metric's slot without
+   taking the metric's size — it is a state, not a value. */
+.metric-learning {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  color: var(--text-3);
+}
+/* A timestamp in a metric slot cannot carry the metric type size and stay on
+   one line. */
+.metric-timestamp {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.quality-grid {
+  display: grid;
+  gap: var(--sp-4);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
 /* --- code ------------------------------------------------------------------ */
 
 code,
@@ -1185,6 +1294,11 @@ pre {
   .dimension-button-active {
     border-left: none;
     border-bottom-color: var(--info);
+  }
+  /* Two quality panels side by side leave neither enough room for its
+     sentence; they stack instead. */
+  .quality-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
