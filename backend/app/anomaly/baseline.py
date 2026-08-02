@@ -182,7 +182,28 @@ class BaselineBuilder:
         self, log_source: LogSource, start: datetime, end: datetime
     ) -> list[tuple[datetime, datetime]]:
         """Intervals to exclude: spans of any anomaly (resolved or not) for this
-        source. An active anomaly must not poison the baseline used to judge it."""
+        source. An active anomaly must not poison the baseline used to judge it.
+
+        A span ends when the anomaly stopped, which is not the same as when it
+        was resolved. Bounding by `resolved_at` alone extends the span to the
+        end of the lookback window for anything unresolved, which breaks two
+        ways:
+
+          * Deadlock. An OPEN incident then excludes the very buckets a new
+            seasonal cell needs, so the detector has no baseline, returns
+            INSUFFICIENT_DATA instead of a healthy verdict, and the incident can
+            never recover -- it needs the baseline that its own existence
+            prevents. Observed live on 2026-08-02: source 262 sat OPEN through
+            seven consecutive normal buckets with `consecutive_healthy` at zero.
+          * Permanent poisoning. A CANDIDATE that returns to normal before
+            opening is never resolved, so `resolved_at` stays NULL forever and
+            that source's buckets are excluded indefinitely.
+
+        Buckets after `anomaly_end` are the recovery buckets -- normal by
+        definition, and exactly what recovery must be judged on. An incident
+        with no `anomaly_end` yet is still genuinely in progress, so it keeps
+        excluding to the end of the window.
+        """
         anomalies = list(
             (
                 await self.session.scalars(
@@ -195,7 +216,7 @@ class BaselineBuilder:
         )
         spans: list[tuple[datetime, datetime]] = []
         for a in anomalies:
-            span_end = a.resolved_at or end
+            span_end = a.resolved_at or a.anomaly_end or end
             spans.append((a.detected_at, span_end))
         return spans
 
