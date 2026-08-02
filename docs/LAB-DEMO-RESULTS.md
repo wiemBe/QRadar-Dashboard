@@ -92,3 +92,87 @@ sources still require operator/UI setup and validation. No rule was created thro
 - No bounded scenario generated a QRadar offense. Existing offense history, top-entity views,
   contributing-rule evidence, and RuleMetric provenance remain populated by the 14 stored live
   offense snapshots.
+
+# Phase A live validation (2026-08-02)
+
+**Status:** in progress. This section records only verified live facts.
+
+## Live log source
+
+| Property | Value |
+|---|---|
+| QRadar log-source ID | 227 |
+| Name | LAB Phase A Firewall |
+| Identifier | `lab-fw-volume-01` |
+| Parser type | **Netgate pfSense** (native parsing; not Universal LEEF) |
+| Event collector | 7 |
+| Enabled | true |
+
+## Ingestion smoke test
+
+Two bounded runs were sent before any scenario:
+
+| Run ID | Format | Attempted | Sent | Ariel |
+|---|---|---:|---:|---|
+| `labrun-smoke-20260802T122807Z` | leef | 20 | 20 | — |
+| `labrun-smoke2-20260802T124705Z` | pfsense | 20 | 20 | 20 in the 12:47Z minute, all routed to source 227 |
+
+Read-only Ariel confirms source 227 received exactly **20 events**, all within `12:47Z`, with
+`sourceip` parsed natively (top value `203.0.113.50`, 6 events).
+
+## Defect found and fixed: unscoped Ariel searches
+
+The scheduled baseline-spike-recovery run did **not** execute — no manifest, no process, and Ariel
+shows no source-227 traffic outside the 12:47Z smoke minute. While confirming that, a blocking
+defect was found in the Ariel query builders.
+
+Both `get_log_source_metrics` and `get_dimension_aggregates` bounded their window with a `WHERE`
+clause on `starttime` alone and carried no explicit Ariel time range. QRadar scopes such a search to
+a recent default window and intersects it with the `WHERE` clause, so any query for an interval
+older than that default returns zero rows.
+
+Measured on the lab appliance, identical query, window `11:50Z–17:40Z`:
+
+| Query form | Result |
+|---|---|
+| `WHERE starttime >= .. AND starttime < ..` only | **0 rows, 0 total** |
+| same query plus `START <ms> STOP <ms>` | **28 log sources**, including `{logsourceid: 227, count: 20}` |
+
+The failure is silent and directionally wrong:
+
+- metric collection recorded an uncollected backlog as *no events*, which the detector cannot
+  distinguish from a source that genuinely fell silent;
+- contributor evidence for a past anomaly interval — always the Phase A case, since an interval is
+  explained after it ends — returned empty rather than `UNAVAILABLE`, so an anomaly would be
+  reported as unexplained instead of unexplainable.
+
+Fixed in `dc9aa34` by appending `START <ms> STOP <ms>` to both builders. The `WHERE` clause remains
+authoritative for the half-open bucket bound; `START/STOP` only scopes the search. Bucket boundary
+semantics were verified live to be exact: the `12:47–12:48Z` bucket returns 20 events for source
+227 and the adjacent `12:48–12:49Z` bucket returns 0.
+
+Two regression tests were added and both fail against the pre-fix builders. Post-fix, the running
+worker returns 12 log-source samples for a 4.5-hour-old bucket, including source 227 at 20 events.
+
+## Collection gap, explained
+
+Metric buckets existed only for `12:48Z–12:54Z`. This had two independent causes, both now
+understood:
+
+1. the unscoped-search defect above, which silently zeroed every historical bucket; and
+2. a real lab outage — the host suspended, leaving a Celery beat gap from `15:47:10Z` to
+   `17:33:44Z`. Read-only Ariel confirms **zero events across all sources** in `16:35Z–16:48Z`, so
+   the collector's `samples: 0` for that span was correct rather than defective.
+
+Background lab traffic resumed at roughly `17:33Z` and is flowing at about 8,300 events/minute
+across other log sources. Source 227 remains at zero outside the smoke minute, so it is clean for
+scenario work.
+
+No metric, anomaly, or evidence row was deleted at any point. The `log_source_metric` watermark was
+reset backward to `12:54Z` to re-collect the window the defect had skipped; re-collection is an
+idempotent upsert on `(log_source_id, bucket_start)`.
+
+## Live scenario results
+
+Not yet run. Acceptance Test 1 (baseline-spike-recovery), multi-source isolation, drop, and silence
+all remain outstanding, as do the API and frontend live checks and the `LAB_MODE` cleanup.
