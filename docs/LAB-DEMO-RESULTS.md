@@ -194,7 +194,127 @@ Until that follow-up lands, a watermark must not be reset while collection tasks
 future reset must pause Beat or worker consumption, wait for in-flight collection to drain, reset
 through a documented path, resume collection, and verify the next window.
 
-## Live scenario results
+## Acceptance Test 1 — baseline / spike / recovery (PASSED)
 
-Not yet run. Acceptance Test 1 (baseline-spike-recovery), multi-source isolation, drop, and silence
-all remain outstanding, as do the API and frontend live checks and the `LAB_MODE` cleanup.
+Run ID `labrun-a1-20260802T182658Z`, scenario `baseline-spike-recovery`, format pfsense, UDP/514,
+source `lab-fw-volume-01` (QRadar log source 227). Peak rate 6 EPS, far below the 50 EPS limit.
+
+Sanitized command parameters: `--scenario baseline-spike-recovery --format pfsense --baseline-eps 2
+--baseline-duration 480 --anomaly-eps 6 --anomaly-duration 240 --recovery-duration 240`.
+
+**Actual** phase timestamps from the run manifest — 2,880 of 2,880 events sent, zero errors:
+
+| Phase | EPS | Actual start | Actual end | Sent |
+|---|---:|---|---|---:|
+| baseline | 2 | 18:27:00.585Z | 18:35:00.085Z | 960 |
+| anomaly | 6 | 18:35:00.585Z | 18:39:00.419Z | 1,440 |
+| recovery | 2 | 18:39:00.585Z | 18:43:00.085Z | 480 |
+
+### Complete buckets
+
+15 buckets, every one `COMPLETE`, no partial or unfinished bucket used as evidence:
+
+| Window | Events | EPS | Phase |
+|---|---:|---:|---|
+| 18:27–18:35Z (8 buckets) | 119 each | 1.983 | baseline |
+| 18:35–18:36Z | 357 | 5.950 | anomaly |
+| 18:36–18:39Z (3 buckets) | 359 each | 5.983 | anomaly |
+| 18:39–18:40Z | 121 | 2.017 | recovery |
+| 18:40–18:42Z (2 buckets) | 119 each | 1.983 | recovery |
+
+### Baseline
+
+Rebuilt through the normal Celery path (`rebuild_baselines`, task `14531c88…`, 0.152 s, 57 sources
+/ 76 cells) at 18:36:38Z, from 8 eligible COMPLETE buckets.
+
+| Metric | Median | MAD | p05 | p95 | Samples | Reliable | Version |
+|---|---:|---:|---:|---:|---:|---|---:|
+| `average_eps` | 1.9833 | **0** | 1.9833 | 1.9833 | 8 | yes | 1 |
+| `event_count` | 119 | **0** | 119 | 119 | 8 | yes | 1 |
+
+Cell weekday 7 / hour 18. Zero samples excluded (`off_hours`, `incomplete`, `unfinished`,
+`maintenance`, `known_anomaly` all 0). MAD is 0 because the generator is deterministic, so this run
+exercised the **zero-MAD deterministic fallback** rather than the robust-z path.
+
+### Detection
+
+| Field | Value |
+|---|---|
+| Detector | `VOLUME_SPIKE` |
+| Observed EPS | 5.983 |
+| Expected EPS | 1.983 |
+| Ratio | 3.0168 (min 2.0) |
+| Absolute delta | 240 (min 100) |
+| Robust z | 20.168 (zero-MAD fallback) |
+| Confidence | 0.457 |
+| Severity | MEDIUM |
+| Baseline version | 1 |
+| Detection policy version | 1 |
+
+### Lifecycle (audited transitions)
+
+| From | To | Actual timestamp | Reason |
+|---|---|---|---|
+| `INSUFFICIENT_DATA` | `CANDIDATE` | 18:36:39.586Z | first abnormal bucket |
+| `CANDIDATE` | `OPEN` | 18:37:39.611Z | 2 consecutive abnormal bucket(s) reached the confirmation threshold of 2 |
+| `OPEN` | `RECOVERING` | 18:40:39.603Z | normal bucket observed |
+| `RECOVERING` | `RESOLVED` | 18:41:39.608Z | 2 consecutive normal bucket(s) reached the recovery threshold of 2 |
+
+Anomaly interval `18:35:00Z – 18:39:00Z`. Opened 18:37:39.606Z, resolved 18:41:39.608Z.
+**One** incident total, **zero** active afterwards — no duplicate active incident.
+
+### Explanation evidence
+
+Enqueued through the normal Celery path (`collect_anomaly_explanations`, task `819b5905…`) at
+18:37:52Z, immediately after OPEN was observed; succeeded in 3.279 s with `explained: 1`. No service
+internal was called and no evidence row was inserted by hand.
+
+Package status **PARTIAL**. Baseline window `18:29:00–18:35:00Z`, anomaly window
+`18:35:00–18:37:00Z`, completed 18:37:56.823Z, no error.
+
+| Dimension | Availability | Base card | Anom card | Card ratio | Base top share | Anom top share | New | Disappeared |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `action` | AVAILABLE | 1 | 1 | 1.000 | 1.000 | 1.000 | 0 | 0 |
+| `category` | AVAILABLE | 2 | 2 | 1.000 | 0.730 | 0.752 | 0 | 0 |
+| `destination_ip` | AVAILABLE | 3 | 3 | 1.000 | 0.350 | 0.766 | 0 | 0 |
+| `destination_port` | AVAILABLE | 5 | 5 | 1.000 | 0.211 | 0.736 | 0 | 0 |
+| `event_name` | AVAILABLE | 2 | 2 | 1.000 | 0.730 | 0.752 | 0 | 0 |
+| `protocol` | AVAILABLE | 1 | 1 | 1.000 | 1.000 | 1.000 | 0 | 0 |
+| `qid` | AVAILABLE | 2 | 2 | 1.000 | 0.730 | 0.752 | 0 | 0 |
+| `source_ip` | AVAILABLE | 5 | 5 | 1.000 | 0.228 | 0.722 | 0 | 0 |
+| `source_port` | **TRUNCATED** | 20 | 20 | 1.000 | 0.083 | 0.077 | 20 | 20 |
+| `username` | **UNAVAILABLE** | — | — | — | — | — | 0 | 0 |
+
+`username` carries the detail *"field is not populated for this log source"* and is reported as
+UNAVAILABLE, not as zero or clean. `source_port` is TRUNCATED at the 20-value cap because ephemeral
+ports exceed it; its new/disappeared counts are an artifact of that truncation, not evidence.
+
+Top contributors — **actual QRadar values**, not the generator plan:
+
+| Dimension | Value | Baseline | Anomaly | Delta | % delta | Anom share | Contribution | Rank b→a |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `destination_port` | `445` | 47 | 528 | +481 | 10.2 | 0.736 | 0.959 | 5→1 |
+| `event_name` | `Firewall - Deny` | 65 | 539 | +474 | 7.3 | 0.752 | 0.994 | 2→1 |
+| `destination_ip` | `10.10.10.20` | 76 | 549 | +473 | 6.2 | 0.766 | 0.974 | 3→1 |
+| `source_ip` | `203.0.113.50` | 55 | 518 | +463 | 8.5 | 0.722 | 0.959 | 1→1 |
+| `action` | `R2L` | 240 | 717 | +477 | 2.0 | 1.000 | 1.000 | 1→1 |
+
+Note that QRadar normalizes the firewall action to **`R2L`**, not `DENY`. The reported value is what
+Ariel returned; the generator's intended `DENY` label does not appear as an action value.
+
+The rank shifts (5→1, 3→1, 2→1) and the top-share jumps are the substantive answer to *what changed
+during the anomalous interval*: the spike concentrated on one source IP reaching one destination IP
+on port 445 with denied traffic, while permitted traffic stayed flat (`Firewall - Permit` 175 → 178).
+
+### Lag and health
+
+Ingestion lag sub-minute; events for a bucket were queryable in Ariel within the same minute.
+Collection lag was **40–41 s after bucket end**, stable across the run. Metric collection durations
+52–62 ms. Watermark ended at 18:41:00Z with 39 s lag and zero consecutive failures. Zero task
+failures, retries, or tracebacks in the worker across the entire run. Zero duplicate natural keys.
+
+### Not yet done
+
+Multi-source isolation, drop, and silence scenarios; API and frontend live verification; and the
+`LAB_MODE` cleanup all remain outstanding. The authenticated API could not be exercised in this
+session because `app_user` is empty — no user was created, since that was outside the agreed scope.
