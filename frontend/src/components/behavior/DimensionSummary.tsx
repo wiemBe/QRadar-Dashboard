@@ -12,6 +12,7 @@ import {
   formatCount,
   formatRatio,
   formatShare,
+  newAndDisappearedAreDeterminate,
 } from "@/lib/behavior";
 
 export function DimensionSummary({
@@ -48,8 +49,9 @@ export function DimensionSummary({
         </thead>
         <tbody>
           {dimensions.map((d) => {
-            const checked =
-              d.availability === "AVAILABLE" || d.availability === "TRUNCATED";
+            // Truncated counts are an artifact of the value cap, not a
+            // finding, so they are withheld exactly like unchecked ones.
+            const countsDeterminate = newAndDisappearedAreDeterminate(d.availability);
             return (
               <tr key={d.dimension}>
                 <td>{dimensionLabel(d.dimension)}</td>
@@ -67,8 +69,10 @@ export function DimensionSummary({
                 </td>
                 {/* A zero count is only meaningful if the dimension was
                     actually collected; otherwise it is an em dash. */}
-                <td>{checked ? formatCount(d.new_value_count) : "—"}</td>
-                <td>{checked ? formatCount(d.disappeared_value_count) : "—"}</td>
+                <td>{countsDeterminate ? formatCount(d.new_value_count) : "—"}</td>
+                <td>
+                  {countsDeterminate ? formatCount(d.disappeared_value_count) : "—"}
+                </td>
                 <td className="muted">{d.detail ?? (d.truncated ? "truncated" : "—")}</td>
               </tr>
             );

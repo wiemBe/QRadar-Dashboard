@@ -8,6 +8,7 @@
 
 import type { ExplanationDimension } from "@/lib/api";
 import {
+  contributorsAreShowable,
   dimensionLabel,
   dimensionMeaning,
   dimensionTone,
@@ -16,11 +17,15 @@ import {
   formatPercentDelta,
   formatRatio,
   formatShare,
+  newAndDisappearedAreDeterminate,
 } from "@/lib/behavior";
 
 export function ContributorTable({ dimension }: { dimension: ExplanationDimension }) {
   const label = dimensionLabel(dimension.dimension);
-  const checked = dimension.availability === "AVAILABLE" || dimension.availability === "TRUNCATED";
+  const checked = contributorsAreShowable(dimension.availability);
+  // Truncation makes the counts an artifact of the cap rather than a finding,
+  // so they are withheld even though the contributor rows are shown.
+  const countsDeterminate = newAndDisappearedAreDeterminate(dimension.availability);
 
   return (
     <section aria-label={`${label} contributors`} style={{ marginTop: 24 }}>
@@ -59,9 +64,11 @@ export function ContributorTable({ dimension }: { dimension: ExplanationDimensio
           </tr>
           <tr>
             <td className="muted">New values</td>
-            <td>{checked ? formatCount(dimension.new_value_count) : "—"}</td>
+            <td>{countsDeterminate ? formatCount(dimension.new_value_count) : "—"}</td>
             <td className="muted">Disappeared values</td>
-            <td>{checked ? formatCount(dimension.disappeared_value_count) : "—"}</td>
+            <td>
+              {countsDeterminate ? formatCount(dimension.disappeared_value_count) : "—"}
+            </td>
           </tr>
         </tbody>
       </table>

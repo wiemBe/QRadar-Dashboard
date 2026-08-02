@@ -111,4 +111,34 @@ describe("truncation", () => {
     render(<DimensionSummary dimensions={[dim({ availability: "TRUNCATED", truncated: true })]} />);
     expect(screen.getByRole("row", { name: /Source IP/ })).toHaveTextContent("truncated");
   });
+
+  // Under a value cap the new/disappeared counts are an artifact of the cap:
+  // a value looks new only because it fell below the cap in the other window.
+  // Rendering them as bare numbers would state a finding the query never
+  // established, so they must read as em dashes.
+  it("withholds new and disappeared counts for a truncated dimension", () => {
+    render(
+      <DimensionSummary
+        dimensions={[
+          dim({
+            availability: "TRUNCATED",
+            truncated: true,
+            new_value_count: 20,
+            disappeared_value_count: 20,
+          }),
+        ]}
+      />,
+    );
+    const cells = within(screen.getByRole("row", { name: /Source IP/ })).getAllByRole("cell");
+    expect(cells[6]).toHaveTextContent("—");
+    expect(cells[7]).toHaveTextContent("—");
+    expect(cells[6]).not.toHaveTextContent("20");
+    expect(cells[7]).not.toHaveTextContent("20");
+  });
+
+  it("still reports counts for a dimension collected in full", () => {
+    render(<DimensionSummary dimensions={[dim({ new_value_count: 37 })]} />);
+    const cells = within(screen.getByRole("row", { name: /Source IP/ })).getAllByRole("cell");
+    expect(cells[6]).toHaveTextContent("37");
+  });
 });

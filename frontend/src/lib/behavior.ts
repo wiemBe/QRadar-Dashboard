@@ -192,6 +192,34 @@ export function dimensionTone(
   }
 }
 
+/**
+ * Whether a dimension's contributor rows may be shown at all.
+ *
+ * A truncated result is still a real observation of the top of the list, so its
+ * rows are shown; an unavailable or failed dimension has nothing to show.
+ */
+export function contributorsAreShowable(
+  availability: DimensionAvailability | null | undefined,
+): boolean {
+  return availability === "AVAILABLE" || availability === "TRUNCATED";
+}
+
+/**
+ * Whether the new/disappeared counts may be stated as findings.
+ *
+ * Only when the dimension was collected in full. Under truncation the counts
+ * are an artifact of the value cap, not an observation: a value looks "new"
+ * merely because it fell below the cap in the other window, and "disappeared"
+ * for the same reason in reverse. Reporting those numbers as findings would
+ * assert something the query never established, so they must not be rendered
+ * as bare counts.
+ */
+export function newAndDisappearedAreDeterminate(
+  availability: DimensionAvailability | null | undefined,
+): boolean {
+  return availability === "AVAILABLE";
+}
+
 export function dimensionMeaning(
   availability: DimensionAvailability | null | undefined,
 ): string {
@@ -199,7 +227,7 @@ export function dimensionMeaning(
     case "AVAILABLE":
       return "Collected in full for both windows.";
     case "TRUNCATED":
-      return "The result hit the configured value cap, so the contributors below are the top of the list rather than the whole of it.";
+      return "The result hit the configured value cap, so the contributors below are the top of the list rather than the whole of it. New and disappeared values cannot be determined under a cap — a value can look new simply because it fell below the cap in the other window — so those counts are not reported.";
     case "UNAVAILABLE":
       return "Unavailable — this field was not exposed by the QRadar event schema or DSM for the selected interval. It has not been checked, and no conclusion may be drawn from the absence of contributors here.";
     case "FAILED":

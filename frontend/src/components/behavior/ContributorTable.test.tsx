@@ -241,3 +241,36 @@ describe("a failed dimension", () => {
     expect(screen.queryByText(/no value stood out/i)).toBeNull();
   });
 });
+
+describe("truncated dimension", () => {
+  // A truncated result is a real observation of the top of the list, so its
+  // contributor rows stand. Its new/disappeared counts do not: under a cap a
+  // value looks new only because it fell below the cap in the other window.
+  const truncated = dimension({
+    availability: "TRUNCATED",
+    truncated: true,
+    new_value_count: 20,
+    disappeared_value_count: 20,
+  });
+
+  it("still shows the contributor rows it did observe", () => {
+    render(<ContributorTable dimension={truncated} />);
+    expect(screen.queryByText(/no value stood out/i)).toBeNull();
+    expect(screen.getByText("TRUNCATED")).toBeInTheDocument();
+  });
+
+  it("withholds the new and disappeared counts", () => {
+    render(<ContributorTable dimension={truncated} />);
+    const row = screen.getByRole("row", { name: /New values/ });
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[1]).toHaveTextContent("—");
+    expect(cells[3]).toHaveTextContent("—");
+    expect(cells[1]).not.toHaveTextContent("20");
+    expect(cells[3]).not.toHaveTextContent("20");
+  });
+
+  it("says why the counts cannot be determined", () => {
+    render(<ContributorTable dimension={truncated} />);
+    expect(screen.getByText(/cannot be determined under a cap/i)).toBeInTheDocument();
+  });
+});
