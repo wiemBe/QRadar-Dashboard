@@ -206,6 +206,281 @@ python tools/qradar_lab_loggen.py --scenario timestamp-delay --timestamp-delay 3
 python tools/qradar_lab_loggen.py --scenario cardinality-drop --types dns --seed 18 --count 20
 ```
 
+## Phase A volume scenarios
+
+The scenarios above vary event *content*. The eight Phase A scenarios vary *volume over time*
+against a stable source identity, which is the only thing the source-volume detectors judge. They
+are the end-to-end exercise for: generator → QRadar syslog → bounded Ariel aggregation → metric
+buckets → seasonal baseline → spike/drop/silence detection → lifecycle → explanation evidence →
+behavioral frontend.
+
+| Scenario | Phases | What it demonstrates |
+|---|---|---|
+| `source-volume-baseline` | baseline | Builds baseline samples for one source |
+| `source-volume-spike` | anomaly | An immediate high-volume interval |
+| `source-volume-drop` | anomaly | An immediate materially lower interval |
+| `source-volume-silence` | baseline, then clean exit | `NO_EVENTS` after the grace period |
+| `baseline-spike-recovery` | baseline → anomaly → recovery | Full `VOLUME_SPIKE` lifecycle |
+| `baseline-drop-recovery` | baseline → anomaly → recovery | Full `VOLUME_DROP` lifecycle |
+| `multi-source-single-spike` | baseline → anomaly → recovery | Detector isolation; only one source rises |
+| `multi-source-single-drop` | baseline → anomaly → recovery | Detector isolation; only one source falls |
+
+### Stable Phase A source identities
+
+A Phase A scenario never changes hostname mid-run, and the RFC3164 hostname is exactly the QRadar
+log-source identifier.
+
+| Host / log-source identifier | Device address | Kind |
+|---|---|---|
+| `lab-fw-volume-01` | `10.20.0.11` | firewall (default for single-source scenarios) |
+| `lab-fw-volume-02` | `10.20.0.12` | firewall (default for `source-volume-silence`) |
+| `lab-fw-volume-03` | `10.20.0.13` | firewall |
+| `lab-waf-volume-01` | `10.20.0.21` | WAF |
+| `lab-ips-volume-01` | `10.20.0.31` | IPS |
+
+Multi-source scenarios always use `lab-fw-volume-01/02/03`, and only the first one changes rate.
+Silence defaults to `lab-fw-volume-02` so a silence run never erases the history of the source used
+for spike and drop. Do not run silence and a multi-source scenario at the same time.
+
+### Event format
+
+LEEF 2.0 is the default. The header is
+`LEEF:2.0|QRadarLab|<product>|1.0|<eventId>|0x09|`, the extension is **tab**-delimited, and the
+RFC3164 hostname always equals `deviceHostName`.
+
+`devTime` is **epoch milliseconds**, so QRadar needs no `devTimeFormat` and makes no assumption
+about the log source's timezone. ISO text would be read against the configured log-source timezone,
+and an event parsed a few hours late lands in the wrong metric bucket — which would silently
+invalidate a whole validation run.
+
+Firewall event (`lab-fw-volume-01`, wrapped here for readability; on the wire it is one line and
+the field separator is a tab):
+
+```text
+<134>Aug 01 12:00:00 lab-fw-volume-01 LEEF:2.0|QRadarLab|SyntheticFirewall|1.0|FW_CONNECTION_DENIED|0x09|
+devTime=1785671418867	eventId=FW_CONNECTION_DENIED	eventName=Firewall Denied Connection
+deviceHostName=lab-fw-volume-01	deviceAddress=10.20.0.11	src=203.0.113.50	dst=10.10.10.20
+srcPort=41000	dstPort=445	proto=TCP	action=DENY	severity=6	category=Firewall
+runId=labrun-a1	scenario=baseline-spike-recovery	phase=anomaly	sev=6	cat=Firewall
+direction=inbound	ifName=ens160	policyId=FW-191	ruleName=lab-perimeter-drop	tcpFlags=SYN
+ttl=108	pktLen=84	bytesIn=0	bytesOut=0	sessionId=8991880
+```
+
+WAF event (`lab-waf-volume-01`) replaces the firewall detail block with:
+
+```text
+httpMethod=POST	url=/api/v1/report?id=1%27+OR+%271%27%3D%271	virtualHost=portal.lab.test
+userAgent=sqlmap/1.8	responseCode=403	bytesIn=1360	bytesOut=0	ruleId=942100
+```
+
+IPS event (`lab-ips-volume-01`) replaces it with:
+
+```text
+sigId=2010935	classification=attempted-admin	priority=1	flowId=3276503845	pktCount=216
+direction=inbound	ifName=ens160
+```
+
+#### Fields and how QRadar sees them
+
+| LEEF key | Example | Mapping |
+|---|---|---|
+| `devTime` | `1785671418867` | Standard. Epoch ms; no `devTimeFormat` required |
+| `src`, `dst` | `203.0.113.50`, `10.10.10.20` | Standard → Source IP / Destination IP |
+| `srcPort`, `dstPort` | `41000`, `445` | Standard → Source Port / Destination Port |
+| `proto` | `TCP` | Standard → Protocol |
+| `sev` | `6` | Standard → Severity (`severity` is the same value, spelled out) |
+| `cat` | `Firewall` | Standard → Category (`category` is the same value, spelled out) |
+| `eventId` | `FW_CONNECTION_DENIED` | LEEF header field 5; drives the QID mapping |
+| `eventName` | `Firewall Denied Connection` | Custom property |
+| `action` | `DENY` / `ALLOW` | Custom property — used as explanation evidence |
+| `deviceHostName`, `deviceAddress` | `lab-fw-volume-01`, `10.20.0.11` | Custom property |
+| `runId` | `labrun-a1` | Custom property — correlates events with a generator run |
+| `scenario` | `baseline-spike-recovery` | Custom property |
+| `phase` | `baseline` / `anomaly` / `recovery` | Custom property — the generator phase |
+
+The extension is tab-delimited, so every custom property is the same regex shape. Create these as
+**Custom Event Properties** (Admin → Data Sources → Custom Event Properties), regex, capture group
+1, against the Universal LEEF log source:
+
+| Property name | Regex |
+|---|---|
+| LabRunId | `runId=([^\t]+)` |
+| LabScenario | `scenario=([^\t]+)` |
+| LabPhase | `phase=([^\t]+)` |
+| LabAction | `action=([^\t]+)` |
+| LabEventName | `eventName=([^\t]+)` |
+| LabDeviceHostName | `deviceHostName=([^\t]+)` |
+
+Only `LabRunId` and `LabPhase` are needed to verify a run; the rest make the raw event readable in
+the log activity view. Phase A explanation evidence uses the *standard* properties (source IP,
+destination IP, destination port, event name, category), so a spike is explainable even if none of
+the custom properties above are created.
+
+#### Event IDs to map
+
+The generator emits exactly seven event IDs. Map them to QIDs (or let them land as unknown — the
+volume detectors do not care, but `UNKNOWN_EVENT_SPIKE` will notice):
+
+| `eventId` | `eventName` | Source |
+|---|---|---|
+| `FW_CONNECTION_ALLOWED` | Firewall Connection Allowed | firewall |
+| `FW_CONNECTION_DENIED` | Firewall Denied Connection | firewall |
+| `FW_SESSION_CLOSED` | Firewall Session Closed | firewall |
+| `WAF_REQUEST_PASSED` | Web Request Passed | WAF |
+| `WAF_REQUEST_BLOCKED` | Web Request Blocked | WAF |
+| `IPS_SIGNATURE_ALERT` | Intrusion Signature Alert | IPS |
+| `IPS_SIGNATURE_DROP` | Intrusion Signature Drop | IPS |
+
+#### Vendor format
+
+`--format vendor` keeps a parser-testing shape instead, for a separately-created log source with a
+real DSM. One syslog tag, never two:
+
+```text
+<134>Aug 01 12:00:00 lab-fw-volume-01 kernel: [UFW BLOCK] IN=ens160 OUT= SRC=203.0.113.50 DST=10.10.10.20 LEN=84 TOS=0x00 PREC=0x00 TTL=108 DF PROTO=TCP SPT=41000 DPT=445 WINDOW=64240 RES=0x00 SYN URGP=0 runId=labrun-a1 scenario=baseline-spike-recovery phase=anomaly
+```
+
+WAF uses a ModSecurity `[client …] [id …] [msg …] [uri …]` line and IPS a Suricata
+`[Drop] [**] [1:2010935:1] … [Classification: …] [Priority: 1] {TCP} src:port -> dst:port` line.
+Both carry the same `runId`/`scenario`/`phase` trailer. Do not point a vendor run at a working LEEF
+source; parser comparisons need separate identifiers.
+
+### Explanation-aware distribution
+
+During `baseline` and `recovery` the generator spreads events across several source IPs,
+destination IPs, destination ports, both `ALLOW` and `DENY`, and several event names, so an
+explanation query has real contributors to rank.
+
+During a **spike**, only the *additional* volume concentrates — the baseline share keeps its normal
+spread — on deterministic contributors: `src=203.0.113.50`, `dst=10.10.10.20`, `dstPort=445`,
+`action=DENY`, `eventName=Firewall Denied Connection`. The increase should therefore be explainable
+as a change in share.
+
+During a **drop**, the pool narrows to `192.0.2.10/11 → 10.10.10.21:443 ALLOW`, so
+`203.0.113.50`, port `445` and `DENY` disappear entirely and can be tested as disappeared-value
+evidence. A drop is always valid events at a lower rate, never malformed events.
+
+Expected percentages are never hardcoded anywhere in the application; every share reported by the
+investigation view is computed from what QRadar actually ingested.
+
+### Flags
+
+```bash
+# Preview a full lifecycle without sending a packet
+python tools/qradar_lab_loggen.py --scenario baseline-spike-recovery \
+  --run-id labrun-preview --seed 42 --dry-run --stdout \
+  --baseline-duration 60 --anomaly-duration 30 --recovery-duration 30
+
+# The 2 -> 6 -> 2 EPS acceptance run (see the live checklist below for durations)
+python tools/qradar_lab_loggen.py --scenario baseline-spike-recovery \
+  --target 192.168.122.50 --port 514 --protocol udp --format leef \
+  --run-id labrun-a1 --seed 42 \
+  --baseline-eps 2 --baseline-duration 420 \
+  --anomaly-multiplier 3 --anomaly-duration 240 \
+  --recovery-duration 300 \
+  --summary-json lab-runs/labrun-a1.summary.json
+```
+
+| Flag | Meaning |
+|---|---|
+| `--scenario` | One of the eight names above (or a content recipe) |
+| `--run-id` | Stable identifier stamped on every event; defaults to `labrun-<UTC timestamp>` |
+| `--seed` | Reproduces field selection exactly; timestamps still follow the wall clock |
+| `--format` | `leef` (default) or `vendor` |
+| `--baseline-eps` | Baseline rate per source; default 2, or 5 for drop scenarios |
+| `--baseline-duration` | Seconds of baseline; default 360 |
+| `--anomaly-eps` | Absolute anomaly rate; wins over `--anomaly-multiplier` |
+| `--anomaly-multiplier` | Anomaly rate as a multiple of baseline; default 3 (spike) or 0.2 (drop) |
+| `--anomaly-duration` | Seconds of anomaly; default 180 |
+| `--recovery-duration` | Seconds of recovery; default 240 |
+| `--fixed-host` | Pin a single-source scenario to one of the Phase A hosts |
+| `--fixed-source-ip`, `--fixed-destination-ip`, `--fixed-destination-port`, `--fixed-action` | Pin a payload dimension (`ALLOW`/`DENY` for action) |
+| `--bind-address` | Local socket address only; never spoofs a packet source |
+| `--allow-high-rate` | Required when *aggregate* EPS across sources exceeds 100 |
+| `--summary-json` | Write a sanitized run manifest |
+| `--count` | Hard cap on total events, applied on top of the timed plan |
+
+The generator prints a sanitized plan before sending: run ID, target, protocol, format, seed,
+source identities, per-phase rates and durations, expected event count, and an advisory line
+showing events per 60-second bucket with the resulting ratio and absolute delta. It never prints a
+credential.
+
+### Run manifests
+
+`--summary-json` writes run ID, scenario, sources, format, target, protocol, seed, generator
+version, start/end times, per-phase start/end times, requested EPS per phase, events attempted and
+sent per phase, and any transport errors. It contains no token, header or credential. Manifests are
+Git-ignored (`lab-runs/`, `*.summary.json`); paste sanitized excerpts into
+`docs/LAB-DEMO-RESULTS.md` instead of committing the files.
+
+A transport error does not abort a timed scenario — the later phases still carry evidence, and the
+manifest records exactly how many events were lost.
+
+### Manual QRadar log sources for Phase A
+
+Create these by hand in the console; the application never creates or modifies a log source through
+the API.
+
+| Display name | Log source identifier | Type | Protocol |
+|---|---|---|---|
+| LAB Phase A Firewall | `lab-fw-volume-01` | Universal LEEF | Syslog UDP/514 |
+| LAB Phase A Firewall 2 | `lab-fw-volume-02` | Universal LEEF | Syslog UDP/514 |
+| LAB Phase A Firewall 3 | `lab-fw-volume-03` | Universal LEEF | Syslog UDP/514 |
+| LAB Phase A WAF | `lab-waf-volume-01` | Universal LEEF | Syslog UDP/514 |
+| LAB Phase A IPS | `lab-ips-volume-01` | Universal LEEF | Syslog UDP/514 |
+
+Only `lab-fw-volume-01` is required for the first ingestion smoke test. The multi-source acceptance
+test needs `lab-fw-volume-02` and `-03` as well, and the silence test needs `lab-fw-volume-02`.
+
+### Timing the phases against LAB_MODE
+
+Every duration below is derived from the values in the LAB_MODE table further down, not chosen for
+convenience. At a 60-second bucket:
+
+| Phase | Requirement | Minimum | Use |
+|---|---|---:|---:|
+| baseline | `BASELINE_MIN_SAMPLES` = 4 complete buckets | 240 s | 420 s |
+| anomaly | confirmation buckets (see below) | 60–120 s | 240 s |
+| recovery | `ANOMALY_RESOLVE_AFTER_INTERVALS` = 2 complete buckets | 120 s | 300 s |
+| silence | `ANOMALY_SILENCE_GRACE_BUCKETS` = 1 bucket, plus evaluation | 120 s | 180 s |
+
+Two things are easy to get wrong:
+
+- **Baseline cells are keyed `(metric, ISO weekday, hour)`.** At 60-second buckets four samples
+  accumulate inside a single clock hour, but a run that straddles an hour boundary starts filling a
+  *different* cell. Start a baseline phase soon after the hour, not at `:57`.
+- **A partial bucket is not evidence.** The bucket containing "now" is still accumulating and is
+  excluded from baselining. Always let the current bucket close before reading a result.
+
+With `LAB_MODE=true` the confirmation count is 1, and `lifecycle.next_state` promotes the first
+abnormal bucket straight from `NORMAL` to `OPEN` — `CANDIDATE` is never persisted. To observe
+`CANDIDATE → OPEN` without touching a production default or a detection threshold, set the
+confirmation count on the lab source alone:
+
+```sql
+-- one lab log source only; production defaults and thresholds untouched
+UPDATE log_source SET custom_thresholds = '{"open_after": 2}'::jsonb
+WHERE identifier = 'lab-fw-volume-01';
+```
+
+`ThresholdResolver` merges `custom_thresholds` over the resolved profile, so the source needs two
+consecutive abnormal buckets: `CANDIDATE` on the first, `OPEN` on the second. Budget one extra
+anomaly bucket when you do this.
+
+### Guard arithmetic
+
+The volume guards are deliberately **not** part of LAB_MODE — a lab that demonstrates a detector
+production does not run is worse than no lab. Scenario rates must therefore clear the production
+guards on merit:
+
+| Run | Expected/bucket | Observed/bucket | Ratio | Absolute delta | Guards |
+|---|---:|---:|---:|---:|---|
+| spike, 2 → 6 EPS | 120 | 360 | 3.00 | 240 | ratio ≥ 2.0 ✓, delta ≥ 100 ✓, observed ≥ 50 ✓ |
+| drop, 5 → 1 EPS | 300 | 60 | 0.20 | 240 | ratio ≤ 0.5 ✓, delta ≥ 100 ✓, expected ≥ 50 ✓ |
+
+This is why drop scenarios default to a 5 EPS baseline: a 2 EPS baseline dropping to 0.4 EPS is a
+delta of 96 and would be correctly refused by the absolute-delta guard.
+
 ## Manual lab-only QRadar rule recipes
 
 Create and deploy these only in the QRadar UI. Scope every rule to the named LAB log source so no
@@ -241,6 +516,33 @@ enabled in a non-production `.env`, the profile applies exactly:
 Four completed metric buckets are still required for a reliable baseline, an anomaly needs one
 confirmed anomalous bucket, and recovery needs two healthy buckets. This keeps the demo short
 without treating a single observation as a baseline or a single healthy interval as recovery.
+
+Everything else keeps its production value. LAB_MODE may shorten *timing* only; it never lowers a
+detection threshold:
+
+| Setting | Value in both production and LAB_MODE |
+|---|---:|
+| `ANOMALY_SPIKE_RATIO` | 2.0 |
+| `ANOMALY_DROP_RATIO` | 0.5 |
+| `ANOMALY_MIN_ABSOLUTE_DELTA_EVENTS` | 100 |
+| `ANOMALY_MIN_BUCKET_EVENTS` | 50 |
+| `ANOMALY_DEVIATION_THRESHOLD` | 3.5 |
+| `ANOMALY_SILENCE_GRACE_BUCKETS` | 1 |
+| `EXPLANATION_COLLECTION_INTERVAL_SECONDS` | 300 |
+
+`rebuild_baselines` runs on a 24-hour beat, so a lab run must trigger it explicitly rather than
+wait for it:
+
+```bash
+docker compose exec celery-worker \
+  celery -A app.workers.celery_app call rebuild_baselines
+docker compose exec celery-worker \
+  celery -A app.workers.celery_app call collect_metrics
+docker compose exec celery-worker \
+  celery -A app.workers.celery_app call evaluate_anomalies
+docker compose exec celery-worker \
+  celery -A app.workers.celery_app call collect_anomaly_explanations
+```
 
 After changing `LAB_MODE`, rebuild/restart backend, worker, and Beat. Confirm the loaded schedule
 with Celery inspection; do not infer it from the `.env` file alone.
