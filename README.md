@@ -425,7 +425,8 @@ inventory surfaces remain as supporting capabilities.
 
 | Route | Purpose |
 |---|---|
-| `/behavior` | Behavioral overview — fleet posture, source behavior table, highest deviation, recently resolved |
+| `/behavior` | Behavioral overview — four decision counters, the worklist needing attention, recently resolved, health distribution |
+| `/behavior/sources` | Source inventory — searchable, sortable, filterable, server-paginated |
 | `/behavior/sources/[id]` | One source's observed volume against its seasonal baseline, with anomaly overlay |
 | `/anomalies` | Filterable, server-paginated anomaly list |
 | `/anomalies/[id]` | **Anomaly investigation** — what changed during the anomalous interval |
@@ -440,9 +441,11 @@ contacts QRadar or the MCP service directly.
 
 ### The investigation page
 
-`/anomalies/[id]` answers one question — *what changed during the anomalous interval* — in seven
-sections: detection summary, timeline, lifecycle history, evidence completeness, contributor
-dimensions, dimension summary, and query provenance.
+`/anomalies/[id]` answers one question — *what changed during the anomalous interval*. It opens with
+a deterministic incident summary and four primary metrics, then the timeline, then what changed; the
+lifecycle history, query provenance and detector internals sit behind the investigation tabs, and the
+AQL is collapsed inside them. The UX contract for this page and every other behavioral route is
+[docs/PRODUCT-UX-GUIDELINES.md](docs/PRODUCT-UX-GUIDELINES.md).
 
 Two behaviors there are load-bearing and are covered by tests:
 
