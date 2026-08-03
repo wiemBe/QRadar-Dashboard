@@ -445,7 +445,9 @@ contacts QRadar or the MCP service directly.
 a deterministic incident summary and four primary metrics, then the timeline, then what changed; the
 lifecycle history, query provenance and detector internals sit behind the investigation tabs, and the
 AQL is collapsed inside them. The UX contract for this page and every other behavioral route is
-[docs/PRODUCT-UX-GUIDELINES.md](docs/PRODUCT-UX-GUIDELINES.md).
+[docs/PRODUCT-UX-GUIDELINES.md](docs/PRODUCT-UX-GUIDELINES.md); the verification record, including
+the viewport matrix and screenshots, is
+[docs/UI-WORKSTREAM-COMPLETION.md](docs/UI-WORKSTREAM-COMPLETION.md).
 
 Two behaviors there are load-bearing and are covered by tests:
 
