@@ -23,8 +23,7 @@ they were verified, how, and with what result.
 
 ## 2. Commit chain
 
-All commits below are in the current local ancestry. The last four are
-**local-only and unpushed** at the time of writing.
+All commits below are in the current local ancestry.
 
 | Workstream | Commit | Subject | Published |
 |---|---|---|---|
@@ -32,10 +31,10 @@ All commits below are in the current local ancestry. The last four are
 | 2 — overview + inventory | `12b0db8` | `feat(ui): simplify overview and add source inventory` | yes |
 | 3 — triage + investigation | `0d6ee14` | `feat(ui): redesign anomaly triage and investigation` | yes |
 | 4 — source behavior + layout | `1a76dac` | `feat(ui): refine source behavior and responsive layout` | yes |
-| 4 — completion fix | `443d509` | `feat(ui): refine source behavior and responsive layout` | **no** |
-| 5 — test coverage | `6956a29` | `test(ui): cover hierarchy evidence and accessibility` | **no** |
-| UX guidelines | `9e6bd25` | `docs(ui): add product UX guidelines` | **no** |
-| Final verification | this commit | `docs(ui): record final verification and completion` | **no** |
+| 4 — completion fix | `443d509` | `feat(ui): refine source behavior and responsive layout` | yes |
+| 5 — test coverage | `6956a29` | `test(ui): cover hierarchy evidence and accessibility` | yes |
+| UX guidelines | `9e6bd25` | `docs(ui): add product UX guidelines` | yes |
+| Final verification | `34e056d` | `docs(ui): record final verification and completion` | **no** |
 
 No defect-fix commit was required by this workstream: final verification found
 no product defect.
@@ -249,8 +248,15 @@ was issued.
 
 ## 11. Publication state
 
-- Local `HEAD` before this commit: `9e6bd25`
-- `origin/main`: `1a76dac`
-- Unpushed: `443d509`, `6956a29`, `9e6bd25`, and this commit.
-- **No push was performed**, and no existing commit was amended, rebased,
-  squashed or force-pushed.
+- Local `HEAD`: `34e056d`
+- `origin/main`: `9e6bd25`
+- Unpushed: `34e056d` only — the final verification commit.
+- **No push was performed by this workstream**, and no commit was amended,
+  rebased, squashed or force-pushed.
+
+`origin/main` stood at `1a76dac` when this workstream began and at `9e6bd25`
+when it ended. The three intervening commits — `443d509`, `6956a29` and
+`9e6bd25` — were published by a push issued outside this workstream while it was
+running; the ref log records it as `update by push`. The commits are unchanged
+by it, and the verification recorded here was performed against exactly that
+tree.
