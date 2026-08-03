@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AnomalySummary, BaselineCell, MetricBucket, SourceBehavior } from "./api";
 import {
+  ACTIVE_STATES,
   DEFAULT_RANGE,
   baselineQuality,
   collectionHealth,
@@ -240,6 +241,26 @@ describe("partitionAnomalies", () => {
     expect(isActiveAnomaly(a)).toBe(false);
     expect(partitionAnomalies([a]).active).toHaveLength(0);
     expect(partitionAnomalies([a]).recent).toHaveLength(1);
+  });
+
+  it("keeps an active state active despite a stray resolved timestamp", () => {
+    // The mirror of the defect above. `resolved_at` is not the authority in
+    // either direction: a row that is still OPEN is still work, and reading a
+    // stray timestamp as closure would drop a live incident off the list.
+    const a = anomaly({ state: "OPEN", resolved_at: "2026-08-02T22:30:00Z" });
+    expect(isActiveAnomaly(a)).toBe(true);
+    expect(partitionAnomalies([a]).active).toHaveLength(1);
+    expect(partitionAnomalies([a]).recent).toHaveLength(0);
+  });
+
+  it("treats every remaining state as not active", () => {
+    // Completes the matrix: only CANDIDATE, OPEN and RECOVERING are work.
+    // SUPPRESSED is a decision already taken, and INSUFFICIENT_DATA is the
+    // absence of a judgement rather than the presence of a finding.
+    for (const state of ["RESOLVED", "SUPPRESSED", "INSUFFICIENT_DATA", "NORMAL"] as const) {
+      expect(isActiveAnomaly(anomaly({ state })), state).toBe(false);
+    }
+    expect(ACTIVE_STATES).toEqual(["CANDIDATE", "OPEN", "RECOVERING"]);
   });
 
   it("orders active by severity of lifecycle state", () => {

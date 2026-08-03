@@ -292,6 +292,63 @@ describe("primary metrics", () => {
 });
 
 describe("order of the page", () => {
+  it("answers its questions in one fixed order", async () => {
+    // The whole hierarchy in one assertion, by accessible name rather than by
+    // class: identity, then the four metrics, then the chart, then what is
+    // wrong, then how far to trust it, then the technical detail. The
+    // previous build opened with six equal cards and a collection table and
+    // put the anomalies last, so the order is the deliverable, not a detail.
+    const { container } = await renderPage({ anomalies: [anomaly()] });
+
+    const sections = screen
+      .getAllByRole("heading", { level: 2 })
+      .map((h) => h.textContent);
+    expect(sections).toEqual([
+      "Observed volume",
+      "Anomalies",
+      "Data quality",
+      "Technical detail",
+    ]);
+
+    // The identity heading comes first, and the four metrics sit between it
+    // and the first section.
+    const h1 = screen.getByRole("heading", { level: 1 });
+    const metrics = container.querySelector(".grid-4")!;
+    const chart = screen.getByRole("heading", { level: 2, name: "Observed volume" });
+
+    const before = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(h1.compareDocumentPosition(metrics) & before).toBeTruthy();
+    expect(metrics.compareDocumentPosition(chart) & before).toBeTruthy();
+  });
+
+  it("keeps baseline quality and collection health together, above the technical detail", async () => {
+    // Both are interpretive judgements about how far the numbers above can be
+    // trusted, so they belong to one section rather than being scattered.
+    await renderPage();
+
+    const quality = screen.getByRole("heading", { level: 2, name: "Data quality" });
+    const technical = screen.getByRole("heading", { level: 2, name: "Technical detail" });
+    expect(
+      quality.compareDocumentPosition(technical) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // Non-vacuous: that one section really does carry both judgements, rather
+    // than the words merely appearing somewhere on the page.
+    const section = within(quality.closest("section")!);
+    expect(section.getAllByText(/baseline/i).length).toBeGreaterThan(0);
+    expect(section.getAllByText(/collection/i).length).toBeGreaterThan(0);
+  });
+
+  it("permits no fifth primary metric", async () => {
+    // The four are Observed EPS, Expected EPS, Deviation and Last event. A
+    // fifth card here is how the page drifted back to six last time.
+    const { container } = await renderPage({ anomalies: [anomaly()] });
+
+    const primary = container.querySelector(".grid-4")!;
+    const labels = Array.from(primary.querySelectorAll(".k")).map((k) => k.textContent);
+    expect(labels).toEqual(["Observed EPS", "Expected EPS", "Deviation", "Last event"]);
+  });
+
   it("puts the chart before the anomalies and the technical detail", async () => {
     const { container } = await renderPage({ anomalies: [anomaly()] });
     const headings = Array.from(container.querySelectorAll("h2")).map(

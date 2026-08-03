@@ -100,6 +100,35 @@ async function renderPage() {
   return render(await BehaviorPage());
 }
 
+describe("heading hierarchy", () => {
+  it("has exactly one top-level heading", async () => {
+    // The shell renders before the page, so a stray heading in the sidebar or
+    // a second <h1> in a section would give the document two competing
+    // outlines and make "skip to the heading" ambiguous.
+    mockApi();
+    await renderPage();
+
+    const h1s = screen.getAllByRole("heading", { level: 1 });
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0]).toHaveTextContent(/\S/);
+  });
+
+  it("puts every section heading below the page heading", async () => {
+    mockApi({
+      behavior: summary({ open_anomalies: 1, monitored_sources: 1 }),
+      sources: [source()],
+      active: [anomaly()],
+    });
+    await renderPage();
+
+    // Non-vacuous: this page really does carry sections.
+    const h2s = screen.getAllByRole("heading", { level: 2 });
+    expect(h2s.length).toBeGreaterThan(0);
+    // No section may claim the document's top level.
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+});
+
 describe("primary metrics", () => {
   it("shows exactly four primary KPI cards", async () => {
     // The page previously opened with ten equally weighted counters, which is

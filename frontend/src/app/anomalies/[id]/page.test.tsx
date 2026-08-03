@@ -443,6 +443,37 @@ describe("first viewport", () => {
 });
 
 describe("timeline", () => {
+  it("holds the investigation hierarchy in one fixed order", async () => {
+    // Deterministic summary and the four metrics first, then the timeline,
+    // then what changed, and only then the technical detail behind its tab.
+    // Asserted by accessible name so a class rename cannot silently reorder
+    // the page.
+    const { container } = await renderPage();
+
+    expect(
+      screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent),
+    ).toEqual(["Timeline", "What changed", "Investigation detail"]);
+
+    const h1 = screen.getByRole("heading", { level: 1 });
+    const metrics = container.querySelector(".grid-4")!;
+    const timeline = screen.getByRole("heading", { level: 2, name: "Timeline" });
+
+    const follows = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(h1.compareDocumentPosition(metrics) & follows).toBeTruthy();
+    expect(metrics.compareDocumentPosition(timeline) & follows).toBeTruthy();
+  });
+
+  it("keeps the raw technical material out of the initial render", async () => {
+    // The page this replaced opened with the provenance table and the AQL
+    // visible. Both are still reachable; neither is the first thing read.
+    await renderPage();
+
+    expect(screen.queryByText(/SELECT /i)).toBeNull();
+    // At most one contributor table on arrival, and no second one hidden
+    // behind the first.
+    expect(screen.getAllByRole("table").length).toBeLessThanOrEqual(1);
+  });
+
   it("appears before the investigation detail", async () => {
     const { container } = await renderPage();
     const headings = Array.from(container.querySelectorAll("h2")).map(

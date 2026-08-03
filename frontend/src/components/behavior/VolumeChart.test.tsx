@@ -278,3 +278,79 @@ describe("overlays", () => {
     expect(line.data).toHaveLength(2);
   });
 });
+
+describe("accessibility", () => {
+  // ECharts draws into a canvas, which is opaque to assistive technology. The
+  // contract is therefore that the chart is named, and that nothing it is the
+  // only carrier of is critical — the numbers behind it are also available as
+  // text.
+  it("exposes the chart as a named image rather than an unlabelled box", () => {
+    const { container } = render(
+      <VolumeChart
+        buckets={[bucket()]}
+        expected={2}
+        expectedLow={null}
+        expectedHigh={null}
+        ariaLabel="Observed EPS for LAB Firewall against its expected baseline"
+      />,
+    );
+
+    const figure = container.querySelector(".chart")!;
+    expect(figure).toHaveAttribute("role", "img");
+    expect(figure).toHaveAccessibleName(
+      "Observed EPS for LAB Firewall against its expected baseline",
+    );
+  });
+
+  it("names the chart even when the caller passes no label", () => {
+    const { container } = render(
+      <VolumeChart buckets={[bucket()]} expected={2} expectedLow={null} expectedHigh={null} />,
+    );
+    expect(container.querySelector(".chart")).toHaveAccessibleName(/\S/);
+  });
+
+  it("carries the reading of the chart as text, not only as a drawing", () => {
+    // The summary is what a screen-reader user gets instead of the line. Its
+    // wording is tested in `summarizeSourceTimeline`; what matters here is
+    // that it reaches the document.
+    render(
+      <VolumeChart
+        buckets={[bucket()]}
+        expected={2}
+        expectedLow={null}
+        expectedHigh={null}
+        textSummary="Over the last 6 hours the source averaged 2.00 EPS against an expected 2.00."
+      />,
+    );
+
+    expect(
+      screen.getByText(/averaged 2.00 EPS against an expected 2.00/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not communicate a gap by line shape alone", () => {
+    // A missing interval is drawn as a break in the line. Sighted or not, the
+    // reader must also be told in words that the break is uncollected data
+    // rather than measured silence.
+    render(
+      <VolumeChart
+        buckets={[bucket(), bucket({ bucket_start: "2026-07-20T10:05:00Z", completeness: "MISSING" })]}
+        expected={2}
+        expectedLow={null}
+        expectedHigh={null}
+        textSummary="1 interval was not collected and is drawn as a gap, not as zero traffic."
+      />,
+    );
+
+    expect(screen.getByText(/not collected/)).toBeInTheDocument();
+    expect(screen.getByText(/not as zero traffic/)).toBeInTheDocument();
+  });
+
+  it("adds no accessible noise when there is nothing to plot", () => {
+    // An empty window must not leave a named but meaningless image behind.
+    const { container } = render(
+      <VolumeChart buckets={[]} expected={null} expectedLow={null} expectedHigh={null} />,
+    );
+    expect(container.querySelector('[role="img"]')).toBeNull();
+  });
+});

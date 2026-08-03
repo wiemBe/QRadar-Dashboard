@@ -36,6 +36,23 @@ async function renderPage(
   return render(await SourcesIndexPage({ searchParams: Promise.resolve(params) }));
 }
 
+describe("heading hierarchy", () => {
+  it("has exactly one top-level heading", async () => {
+    await renderPage({}, [source(), source({ log_source_id: "s-2", name: "Core Switch" })]);
+
+    const h1s = screen.getAllByRole("heading", { level: 1 });
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0]).toHaveAccessibleName("Sources");
+  });
+
+  it("does not promote a table caption or filter label to a heading", async () => {
+    // The inventory is one table with a filter row above it. Neither may
+    // introduce a competing top-level heading.
+    await renderPage();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+});
+
 describe("rendering", () => {
   it("renders the inventory the overview no longer carries", async () => {
     await renderPage();
