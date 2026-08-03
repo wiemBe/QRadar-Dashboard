@@ -509,6 +509,17 @@ th[aria-sort="descending"] .sort-link {
 
 .table-scroll {
   overflow-x: auto;
+  /* Establishes the containing block for absolutely positioned descendants.
+     `.sr-only` is `position: absolute`, so in a table wider than this
+     container it otherwise resolves against the initial containing block and
+     is laid out at its static position — past the right edge of the viewport,
+     widening the document even though the table itself scrolls locally.
+     Measured on /behavior/sources at 1024x768: documentElement.scrollWidth
+     1027 against clientWidth 1009. `.sticky-actions` tables were accidentally
+     immune because their sticky last column already positions. Containing it
+     here fixes the class of defect for every table rather than for the one
+     page that happened to show it. */
+  position: relative;
   /* Keeps the focus ring of a focused link in the last column visible. */
   padding-bottom: 2px;
   /* A shadow that appears only at an edge that has content beyond it, so a
